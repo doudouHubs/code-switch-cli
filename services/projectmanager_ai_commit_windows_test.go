@@ -70,6 +70,13 @@ func TestValidateProjectManagerAICommitModel(t *testing.T) {
 			want: "gpt-5-codex",
 		},
 		{
+			name: "codex default platform with selected model",
+			reference: PetAgentModelReference{
+				ModelID: "gpt-5.6-luna",
+			},
+			want: "gpt-5.6-luna",
+		},
+		{
 			name: "non codex platform",
 			reference: PetAgentModelReference{
 				ProviderPlatform: "openai",

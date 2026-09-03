@@ -655,7 +655,9 @@ func validateProjectManagerAICommitModel(reference PetAgentModelReference) (stri
 	}
 
 	platform := strings.ToLower(strings.TrimSpace(reference.ProviderPlatform))
-	if platform != "codex" {
+	// 空平台表示 provider、认证和其它运行配置继续由 Codex CLI 默认配置负责；
+	// 只有显式声明了其它平台时才拒绝，避免把“跟随默认配置”误判成非法状态。
+	if platform != "" && platform != "codex" {
 		return "", fmt.Errorf("AI-Commit 不兼容宠物 Agent provider platform %q，仅支持 codex", platform)
 	}
 	// 模型 ID 会进入 PowerShell 单引号字符串；换行/NUL 会破坏脚本或底层进程，

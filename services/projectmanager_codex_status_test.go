@@ -73,3 +73,28 @@ func TestProjectManagerCodexStatusDispatchesEligibleHookToSink(t *testing.T) {
 		t.Fatal("eligible Hook notification was not dispatched to sink")
 	}
 }
+
+func TestProjectManagerCodexStatusDoesNotDispatchSystemErrorToSink(t *testing.T) {
+	service := newProjectManagerCodexStatusService()
+	received := make(chan CodexHookNotification, 1)
+	service.notificationSink = func(_ context.Context, notification CodexHookNotification) error {
+		received <- notification
+		return nil
+	}
+
+	service.dispatchCodexHookNotification(projectManagerCodexHookEvent{
+		EventID:       "dispatch-system-error",
+		HookEventName: "SystemError",
+		SessionID:     "error-session",
+		ProjectID:     `F:\workspace`,
+		Cwd:           `F:\workspace`,
+		Error:         "permission denied",
+		ReceivedAt:    time.Now().UnixMilli(),
+	})
+
+	select {
+	case notification := <-received:
+		t.Fatalf("system error Hook was dispatched = %#v", notification)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

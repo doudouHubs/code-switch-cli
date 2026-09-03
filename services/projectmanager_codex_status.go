@@ -350,6 +350,17 @@ func (s *projectManagerCodexStatusService) dispatchCodexHookNotification(event p
 		}
 		return
 	}
+	// system_error 仍然要参与本地状态识别，模板也继续保留给后续出口使用；
+	// 这里只关闭外部聊天频道旁路，避免微信上下文过期后持续产生无效发送。
+	if notification.Event == CodexHookNotificationSystemError {
+		WriteRuntimeDiagnosticAsync(
+			"codex-hook-notification-filtered",
+			fmt.Sprintf("event_id=%q", notification.EventID),
+			fmt.Sprintf("notification_event=%q", notification.Event),
+			fmt.Sprintf("reason=%q", "system_error_forwarding_disabled"),
+		)
+		return
+	}
 	s.mu.RLock()
 	sink := s.notificationSink
 	s.mu.RUnlock()

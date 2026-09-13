@@ -91,7 +91,7 @@
 
 .project-manager-page .toolbar-actions {
   display: grid;
-  grid-template-columns: minmax(280px, 460px) auto auto;
+  grid-template-columns: minmax(280px, 460px) auto auto auto;
   justify-content: end;
   gap: 12px;
   align-items: center;
@@ -165,6 +165,40 @@
 
 .project-manager-page .selection-toggle-button svg {
   flex: 0 0 auto;
+}
+
+.project-manager-page .global-session-cleanup-menu {
+  position: relative;
+  z-index: 5;
+  display: inline-flex;
+  min-width: max-content;
+}
+
+.project-manager-page .global-session-cleanup-trigger {
+  min-width: max-content;
+  gap: 8px;
+}
+
+.project-manager-page .global-session-cleanup-trigger svg,
+.project-manager-page .global-session-cleanup-option svg {
+  flex: 0 0 auto;
+}
+
+.project-manager-page .global-session-cleanup-spinner {
+  animation: pm-spin 0.72s linear infinite;
+}
+
+.project-manager-page .global-session-cleanup-popover {
+  right: 0;
+  z-index: 10;
+  min-width: 190px;
+}
+
+.project-manager-page .global-session-cleanup-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
 }
 
 .project-manager-page .clear-btn {
@@ -2511,11 +2545,11 @@
   }
 
   .project-manager-page .toolbar {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .project-manager-page .toolbar-actions {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     justify-content: stretch;
   }
 
@@ -2564,17 +2598,51 @@
   }
 
   .project-manager-page .toolbar-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* 手机主内容区会被侧栏压缩，操作项必须逐行占满可用宽度，不能让
+       新增的全局清理菜单把搜索框和刷新按钮推到视口外。 */
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
 
   .project-manager-page .toolbar-actions .search-shell {
-    grid-column: 1 / -1;
+    grid-column: auto;
+  }
+
+  .project-manager-page .mode-switch {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    min-width: 0;
+  }
+
+  .project-manager-page .mode-pill {
+    min-width: 0;
+    padding-inline: 8px;
+    font-size: 0.82rem;
+    flex: 1 1 0;
   }
 
   .project-manager-page .toolbar-actions .selection-toggle-button,
   .project-manager-page .toolbar-actions > .btn:last-child {
     width: 100%;
+  }
+
+  .project-manager-page .global-session-cleanup-menu,
+  .project-manager-page .global-session-cleanup-trigger {
+    width: 100%;
+  }
+
+  .project-manager-page .global-session-cleanup-menu {
+    min-width: 0;
+  }
+
+  .project-manager-page .global-session-cleanup-trigger {
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .project-manager-page .global-session-cleanup-trigger > span {
+    display: none;
   }
 
   .project-manager-page .project-detail-actions {

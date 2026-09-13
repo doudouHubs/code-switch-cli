@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,30 @@ var (
 	runtimeDiagnosticAsyncOnce  sync.Once
 	runtimeDiagnosticAsyncQueue chan runtimeDiagnosticRecord
 )
+
+// ConfigureRuntimeCrashOutput 为下一次未处理 Go panic/致命运行时错误保留
+// 独立现场。它不能捕获 WebView2 自身的 native crash，但能把“无 app-run-return”
+// 从无证据退出变成可读的 goroutine/stack 现场；SetCrashOutput 会复制句柄，
+// 因此本函数可以在启动阶段安全关闭临时文件。
+func ConfigureRuntimeCrashOutput() {
+	home, err := getUserHomeDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(home, appSettingsDir, "codeswitch-crash.log")
+	if err := EnsureDir(filepath.Dir(path)); err != nil {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	if err := debug.SetCrashOutput(file, debug.CrashOptions{}); err != nil {
+		_ = file.Close()
+		return
+	}
+	_ = file.Close()
+}
 
 // WriteRuntimeDiagnosticAsync 把旁路诊断投递到唯一写入 worker。诊断不能与
 // Codex stdout 消费争抢线程；队列满时丢弃诊断也不能影响聊天、工具和关闭流程。

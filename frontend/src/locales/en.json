@@ -554,6 +554,17 @@
         "selectedCount": "Selected {count}",
         "totalCount": "Total {count}"
       },
+      "globalCleanup": {
+        "action": "Global Cleanup",
+        "menuLabel": "Clean all project sessions by time",
+        "busy": "Cleaning all project session details",
+        "noSessions": "There are no project sessions to clean.",
+        "pruned": "Cleaned all project sessions: {turns} conversation turns ({items} details) older than {range}; {empty} sessions had no matching content. Sessions were kept.",
+        "noMatch": "Checked all {count} project sessions. No conversation details older than {range} matched; sessions were kept.",
+        "partial": "Global cleanup older than {range} finished: {turns} turns ({items} details); {failed} sessions failed. Sessions were kept.",
+        "failed": "Global cleanup older than {range} failed: {failed} sessions failed and no details were cleaned. Sessions were kept.",
+        "failureDetails": "Failed items: {items}"
+      },
       "stats": {
         "visibleCount": "Visible now",
         "totalProjects": "Projects",
@@ -735,6 +746,10 @@
         "batchSessionPruneTitle": "Clean Session Details",
         "batchSessionPruneConfirm": "Clean conversation details older than {range} from the {count} selected sessions?",
         "batchSessionPruneHint": "Only matching conversation details will be physically pruned. The sessions and recent content remain; this cannot be undone.",
+        "globalSessionPruneTitle": "Clean All Session Details",
+        "globalSessionPruneConfirm": "Clean conversation details older than {range} from all {count} project sessions?",
+        "globalSessionPruneHint": "Only matching conversation details will be physically pruned. Project sessions will not be deleted; this cannot be undone.",
+        "pruneConfirmAction": "Clean Now",
         "batchSessionPruned": "Cleaned {turns} conversation turns ({items} details) older than {range}; {empty} sessions had no matching content. Sessions were kept.",
         "batchSessionPruneNoMatch": "Checked {count} sessions. No conversation details older than {range} matched; sessions were kept.",
         "batchSessionPrunePartial": "Cleaned {turns} turns ({items} details) older than {range}; {failed} sessions failed. Sessions were kept.",

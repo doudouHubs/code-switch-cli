@@ -4,7 +4,11 @@ import { useI18n } from 'vue-i18n'
 import { ListChecks } from '@lucide/vue'
 import BaseButton from '../common/BaseButton.vue'
 import BaseInput from '../common/BaseInput.vue'
+import ProjectManagerGlobalSessionCleanupMenu from './ProjectManagerGlobalSessionCleanupMenu.vue'
+import type { SessionDeletionRange } from '../../services/projectManager'
 import type { ProjectManagerViewMode } from './types'
+
+type GlobalSessionCleanupRange = Exclude<SessionDeletionRange, 'all'>
 
 const props = defineProps<{
   activeMode: ProjectManagerViewMode
@@ -15,6 +19,9 @@ const props = defineProps<{
   canSelectSessions: boolean
   selectionMode: boolean
   selectionBusy: boolean
+  canCleanupSessions: boolean
+  cleanupDisabled: boolean
+  cleanupBusy: boolean
 }>()
 
 const emit = defineEmits<{
@@ -23,6 +30,7 @@ const emit = defineEmits<{
   refresh: []
   clear: []
   'toggle-selection': []
+  'cleanup-range': [range: GlobalSessionCleanupRange]
 }>()
 
 const { t } = useI18n()
@@ -48,6 +56,7 @@ const searchPlaceholder = computed(() =>
         class="mode-pill tab-pill"
         :class="{ active: activeMode === 'project' }"
         type="button"
+        :disabled="selectionBusy"
         @click="emit('change-mode', 'project')"
       >
         {{ t('components.projectManager.toolbar.projectMode') }}
@@ -56,6 +65,7 @@ const searchPlaceholder = computed(() =>
         class="mode-pill tab-pill"
         :class="{ active: activeMode === 'session' }"
         type="button"
+        :disabled="selectionBusy"
         @click="emit('change-mode', 'session')"
       >
         {{ t('components.projectManager.toolbar.sessionMode') }}
@@ -90,6 +100,12 @@ const searchPlaceholder = computed(() =>
           ×
         </button>
       </div>
+      <ProjectManagerGlobalSessionCleanupMenu
+        v-if="canCleanupSessions"
+        :disabled="cleanupDisabled"
+        :busy="cleanupBusy"
+        @select-range="emit('cleanup-range', $event)"
+      />
       <BaseButton
         v-if="canSelectSessions"
         class="selection-toggle-button"

@@ -63,6 +63,8 @@ type channelAgentRun struct {
 	chatLock *sync.Mutex
 }
 
+const channelThinkingAcknowledgement = "..."
+
 // NewAgentRuntime 创建频道入口适配器。Codex runtime 必须由宿主注入共享 Hub；
 // 这里不再兜底创建独立 PetCodexRuntime，否则频道和 Agent 管家会重新分裂。
 func NewAgentRuntime(
@@ -231,6 +233,10 @@ func (r *AgentRuntime) handleIncoming(message ChannelMessage) {
 	// 入站事件先于 Agent 异步处理到达 UI；持久化完成后再补一条标准 message
 	// 事件，页面刷新历史时不会撞上尚未写入的竞态。
 	r.publish(ChannelEvent{Type: "message", InstanceID: instance.ID, PluginType: instance.Type, Data: message, At: nowMillis()})
+	// 这是传输层回执：先让频道用户知道消息已收到，再执行可能耗时的媒体处理和
+	// Codex 请求。回执只写入频道历史供 UI 展示，不放进 PetChatRequest，避免污染
+	// 管家与频道共用的 Codex 长会话上下文。
+	r.sendThinkingAcknowledgement(instance, message.ChatID)
 	localImages, err := r.persistIncomingMedia(message)
 	if err != nil {
 		// 消息正文已经入库且已通知 UI；媒体落盘失败时停止当前 turn，
@@ -275,6 +281,25 @@ func (r *AgentRuntime) handleIncoming(message ChannelMessage) {
 		r.publishError(instance, err)
 		r.sendFailureMessage(instance, message.ChatID, channelPetAIErrorCode(err))
 		return
+	}
+}
+
+func (r *AgentRuntime) sendThinkingAcknowledgement(instance ChannelInstance, chatID string) {
+	if r == nil || r.manager == nil {
+		return
+	}
+
+	messageID, err := r.manager.SendMessage(context.Background(), instance.ID, chatID, channelThinkingAcknowledgement)
+	if err != nil {
+		// 回执是体验增强而不是 Agent 处理门槛；平台短暂不可用时仍继续当前
+		// 请求，避免因为一条提示消息失败而直接丢掉用户的原始消息。
+		r.publishError(instance, fmt.Errorf("send channel thinking acknowledgement: %w", err))
+		return
+	}
+	if err := appendChannelOutboundMessage(r.store, r.eventSink, instance, chatID, channelThinkingAcknowledgement, messageID); err != nil {
+		// 平台已经收到回执，落库失败不能再重发，否则用户会看到重复的“...”；
+		// 通过 error 事件暴露本地历史缺口，Agent 仍按原流程继续。
+		r.publishError(instance, fmt.Errorf("persist channel thinking acknowledgement: %w", err))
 	}
 }
 

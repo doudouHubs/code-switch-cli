@@ -57,6 +57,8 @@ import type {
   ProjectManagerViewMode,
 } from "./types";
 
+type GlobalSessionCleanupRange = Exclude<SessionDeletionRange, "all">;
+
 const { t, locale } = useI18n();
 const router = useRouter();
 
@@ -74,6 +76,7 @@ const deletingSessionIds = ref<string[]>([]);
 const sessionSelectionMode = ref(false);
 const selectedSessionIds = ref<string[]>([]);
 const batchDeletingSessions = ref(false);
+const globalSessionCleanupBusy = ref(false);
 const sessionDeletionRange = ref<SessionDeletionRange>("all");
 const snapshotProjects = ref<ProjectSummary[]>([]);
 const snapshotSessions = ref<SessionSummary[]>([]);
@@ -121,7 +124,8 @@ const deleteState = reactive({
     | "project"
     | "session"
     | "session-batch"
-    | "session-batch-prune",
+    | "session-batch-prune"
+    | "session-global-prune",
   targetId: "",
   targetIds: [] as string[],
   targetName: "",
@@ -384,6 +388,18 @@ const showProjectGrid = computed(
   () => activeMode.value === "project" && !selectedProjectId.value,
 );
 
+const canCleanupAllSessions = computed(() => showProjectGrid.value);
+const sessionOperationBusy = computed(
+  () => batchDeletingSessions.value || globalSessionCleanupBusy.value,
+);
+const globalSessionCleanupDisabled = computed(
+  () =>
+    loading.value ||
+    refreshing.value ||
+    sessionOperationBusy.value ||
+    snapshotSessions.value.length === 0,
+);
+
 const visibleSessions = computed(() =>
   activeMode.value === "session"
     ? flatSessionCards.value
@@ -420,8 +436,8 @@ const sessionSelectionDockVisible = computed(
   () => sessionSelectionMode.value && canSelectProjectSessions.value,
 );
 
-const sessionDeletionRangeLabel = computed(() => {
-  switch (sessionDeletionRange.value) {
+const getSessionDeletionRangeLabel = (range: SessionDeletionRange) => {
+  switch (range) {
     case "one_week":
       return t("components.projectManager.selection.rangeOneWeek");
     case "three_weeks":
@@ -431,7 +447,7 @@ const sessionDeletionRangeLabel = computed(() => {
     default:
       return t("components.projectManager.selection.rangeAll");
   }
-});
+};
 
 const emptyStateMessage = computed(() => {
   if (loading.value) {
@@ -499,7 +515,7 @@ watch(
 watch(visibleSessions, reconcileSessionSelection);
 
 const toggleSessionSelectionMode = () => {
-  if (!canSelectProjectSessions.value || batchDeletingSessions.value) {
+  if (!canSelectProjectSessions.value || sessionOperationBusy.value) {
     return;
   }
   if (sessionSelectionMode.value) {
@@ -511,7 +527,7 @@ const toggleSessionSelectionMode = () => {
 };
 
 const exitSessionSelectionMode = () => {
-  if (batchDeletingSessions.value) {
+  if (sessionOperationBusy.value) {
     return;
   }
   resetSessionSelection();
@@ -520,7 +536,7 @@ const exitSessionSelectionMode = () => {
 const toggleSessionSelection = (sessionID: string) => {
   if (
     !sessionSelectionMode.value ||
-    batchDeletingSessions.value ||
+    sessionOperationBusy.value ||
     isSessionDeleting(sessionID)
   ) {
     return;
@@ -536,14 +552,14 @@ const toggleSessionSelection = (sessionID: string) => {
 };
 
 const selectAllVisibleSessions = () => {
-  if (!sessionSelectionMode.value || batchDeletingSessions.value) {
+  if (!sessionSelectionMode.value || sessionOperationBusy.value) {
     return;
   }
   selectedSessionIds.value = visibleSessions.value.map((session) => session.id);
 };
 
 const invertVisibleSessionSelection = () => {
-  if (!sessionSelectionMode.value || batchDeletingSessions.value) {
+  if (!sessionSelectionMode.value || sessionOperationBusy.value) {
     return;
   }
   const selectedIDs = new Set(selectedSessionIds.value);
@@ -646,13 +662,16 @@ const loadSnapshot = async (isRefresh = false) => {
 };
 
 const enterProject = (project: ProjectSummary) => {
+  if (sessionOperationBusy.value) {
+    return;
+  }
   resetSessionSelection();
   selectedProjectId.value = project.id;
   activeMode.value = "project";
 };
 
 const handleBackToProjects = () => {
-  if (batchDeletingSessions.value) {
+  if (sessionOperationBusy.value) {
     return;
   }
   resetSessionSelection();
@@ -1068,6 +1087,8 @@ const confirmBatchSessionDelete = async () => {
 const confirmBatchSessionConversationPrune = async () => {
   const targetIDs = [...deleteState.targetIds];
   const range = deleteState.range;
+  const isGlobalCleanup = deleteState.targetType === "session-global-prune";
+  const rangeLabel = getSessionDeletionRangeLabel(range);
   const targetsByID = new Map(
     snapshotSessions.value.map((session) => [session.id, session]),
   );
@@ -1077,7 +1098,11 @@ const confirmBatchSessionConversationPrune = async () => {
     return;
   }
 
-  batchDeletingSessions.value = true;
+  if (isGlobalCleanup) {
+    globalSessionCleanupBusy.value = true;
+  } else {
+    batchDeletingSessions.value = true;
+  }
   deletingSessionIds.value = Array.from(
     new Set([...deletingSessionIds.value, ...targetIDs]),
   );
@@ -1101,38 +1126,54 @@ const confirmBatchSessionConversationPrune = async () => {
     if (failures.length === 0) {
       if (result.total_deleted_items === 0) {
         showToast(
-          t("components.projectManager.delete.batchSessionPruneNoMatch", {
+          t(
+            isGlobalCleanup
+              ? "components.projectManager.globalCleanup.noMatch"
+              : "components.projectManager.delete.batchSessionPruneNoMatch",
+            {
             count: noMatchCount,
-            range: sessionDeletionRangeLabel.value,
-          }),
+            range: rangeLabel,
+            },
+          ),
           "warning",
         );
       } else {
         showToast(
-          t("components.projectManager.delete.batchSessionPruned", {
-            turns: result.total_deleted_turns,
-            items: result.total_deleted_items,
-            range: sessionDeletionRangeLabel.value,
-            empty: noMatchCount,
-          }),
+          t(
+            isGlobalCleanup
+              ? "components.projectManager.globalCleanup.pruned"
+              : "components.projectManager.delete.batchSessionPruned",
+            {
+              turns: result.total_deleted_turns,
+              items: result.total_deleted_items,
+              range: rangeLabel,
+              empty: noMatchCount,
+            },
+          ),
           "success",
         );
       }
     } else {
       const summary = t(
         result.total_deleted_items > 0
-          ? "components.projectManager.delete.batchSessionPrunePartial"
-          : "components.projectManager.delete.batchSessionPruneFailed",
+          ? isGlobalCleanup
+            ? "components.projectManager.globalCleanup.partial"
+            : "components.projectManager.delete.batchSessionPrunePartial"
+          : isGlobalCleanup
+            ? "components.projectManager.globalCleanup.failed"
+            : "components.projectManager.delete.batchSessionPruneFailed",
         {
           turns: result.total_deleted_turns,
           items: result.total_deleted_items,
           failed: failures.length,
           count: targetIDs.length,
-          range: sessionDeletionRangeLabel.value,
+          range: rangeLabel,
         },
       );
       const details = t(
-        "components.projectManager.delete.batchSessionPruneFailureDetails",
+        isGlobalCleanup
+          ? "components.projectManager.globalCleanup.failureDetails"
+          : "components.projectManager.delete.batchSessionPruneFailureDetails",
         { items: failureDetails.join("; ") },
       );
       showToast(`${summary} ${details}`, result.total_deleted_items > 0 ? "warning" : "error");
@@ -1144,10 +1185,49 @@ const confirmBatchSessionConversationPrune = async () => {
     deletingSessionIds.value = deletingSessionIds.value.filter(
       (id) => !targetIDs.includes(id),
     );
-    batchDeletingSessions.value = false;
+    if (isGlobalCleanup) {
+      globalSessionCleanupBusy.value = false;
+    } else {
+      batchDeletingSessions.value = false;
+    }
     deleteState.targetIds = [];
     reconcileSessionSelection();
   }
+};
+
+const openGlobalSessionCleanupModal = (range: GlobalSessionCleanupRange) => {
+  if (
+    !canCleanupAllSessions.value ||
+    sessionOperationBusy.value ||
+    loading.value ||
+    refreshing.value
+  ) {
+    return;
+  }
+
+  // 全局清理必须使用完整快照，不能使用 visibleSessions，否则搜索关键词会悄悄缩小清理范围。
+  const targetSessions = snapshotSessions.value.filter(
+    (session) => session.id.trim().length > 0,
+  );
+  const targetIDs = Array.from(
+    new Set(targetSessions.map((session) => session.id.trim())),
+  );
+  if (targetIDs.length === 0) {
+    showToast(
+      t("components.projectManager.globalCleanup.noSessions"),
+      "warning",
+    );
+    return;
+  }
+
+  // 全局清理先进入统一确认弹窗；只有用户明确确认后才允许改写真实会话文件。
+  deleteState.targetType = "session-global-prune";
+  deleteState.targetId = "";
+  deleteState.targetIds = targetIDs;
+  deleteState.targetName = "";
+  deleteState.sessionCount = targetIDs.length;
+  deleteState.range = range;
+  deleteState.open = true;
 };
 
 const confirmDelete = async () => {
@@ -1156,7 +1236,10 @@ const confirmDelete = async () => {
     await confirmBatchSessionDelete();
     return;
   }
-  if (targetType === "session-batch-prune") {
+  if (
+    targetType === "session-batch-prune" ||
+    targetType === "session-global-prune"
+  ) {
     await confirmBatchSessionConversationPrune();
     return;
   }
@@ -1425,11 +1508,15 @@ onBeforeUnmount(() => {
       :conversation-search="isProjectSessionSearchScope"
       :can-select-sessions="canSelectProjectSessions"
       :selection-mode="sessionSelectionMode"
-      :selection-busy="batchDeletingSessions"
+      :selection-busy="sessionOperationBusy"
+      :can-cleanup-sessions="canCleanupAllSessions"
+      :cleanup-disabled="globalSessionCleanupDisabled"
+      :cleanup-busy="globalSessionCleanupBusy"
       @change-mode="activeMode = $event"
       @clear="searchKeyword = ''"
       @refresh="loadSnapshot(true)"
       @toggle-selection="toggleSessionSelectionMode"
+      @cleanup-range="openGlobalSessionCleanupModal"
     />
 
     <ProjectManagerBreadcrumb
@@ -1658,6 +1745,8 @@ onBeforeUnmount(() => {
           ? t('components.projectManager.delete.projectTitle')
           : deleteState.targetType === 'session-batch'
             ? t('components.projectManager.delete.batchSessionTitle')
+            : deleteState.targetType === 'session-global-prune'
+              ? t('components.projectManager.delete.globalSessionPruneTitle')
             : deleteState.targetType === 'session-batch-prune'
               ? t('components.projectManager.delete.batchSessionPruneTitle')
             : t('components.projectManager.delete.sessionTitle')
@@ -1686,7 +1775,15 @@ onBeforeUnmount(() => {
             {{
               t("components.projectManager.delete.batchSessionPruneConfirm", {
                 count: deleteState.sessionCount,
-                range: sessionDeletionRangeLabel,
+                range: getSessionDeletionRangeLabel(deleteState.range),
+              })
+            }}
+          </p>
+          <p v-else-if="deleteState.targetType === 'session-global-prune'">
+            {{
+              t("components.projectManager.delete.globalSessionPruneConfirm", {
+                count: deleteState.sessionCount,
+                range: getSessionDeletionRangeLabel(deleteState.range),
               })
             }}
           </p>
@@ -1699,8 +1796,13 @@ onBeforeUnmount(() => {
           </p>
           <p class="detail-delete-hint">
             {{
-              deleteState.targetType === 'session-batch-prune'
-                ? t("components.projectManager.delete.batchSessionPruneHint")
+              deleteState.targetType === 'session-batch-prune' ||
+              deleteState.targetType === 'session-global-prune'
+                ? t(
+                    deleteState.targetType === 'session-global-prune'
+                      ? "components.projectManager.delete.globalSessionPruneHint"
+                      : "components.projectManager.delete.batchSessionPruneHint",
+                  )
                 : t("components.projectManager.delete.hint")
             }}
           </p>
@@ -1710,7 +1812,12 @@ onBeforeUnmount(() => {
             {{ t("components.projectManager.rename.cancel") }}
           </BaseButton>
           <BaseButton variant="danger" type="button" @click="confirmDelete">
-            {{ t("components.projectManager.delete.confirmAction") }}
+            {{
+              deleteState.targetType === 'session-batch-prune' ||
+              deleteState.targetType === 'session-global-prune'
+                ? t("components.projectManager.delete.pruneConfirmAction")
+                : t("components.projectManager.delete.confirmAction")
+            }}
           </BaseButton>
         </footer>
       </div>

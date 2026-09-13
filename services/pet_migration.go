@@ -130,6 +130,13 @@ func (m *PetMigrator) Migrate(ctx context.Context) (PetMigrationReport, error) {
 	report.Imported = imported
 	report.Skipped = skipped
 	report = summarizePetMigrationReport(report)
+	if shouldPreservePetRuntimeProgress(marker) {
+		// 迁移完成后，目标库才是运行态的唯一事实源；旧 settings.json 只能继续
+		// 补充配置和历史，不能在源文件变化时重新接管成长、经验或经验日志。
+		snapshot.State = nil
+		snapshot.Experience = nil
+		snapshot.ExpLog = nil
+	}
 
 	// 目标数据与诊断必须在同一事务内提交；否则一半数据成功、下一次启动又无法解释
 	// 上一次结果，最终会形成比源数据更难收拾的双重状态。
@@ -149,6 +156,12 @@ func (m *PetMigrator) Migrate(ctx context.Context) (PetMigrationReport, error) {
 		return m.fail(ctx, report, startedAt, fmt.Errorf("complete pet migration: %w", err))
 	}
 	return report, nil
+}
+
+func shouldPreservePetRuntimeProgress(marker *PetMigrationMarker) bool {
+	// marker 版本可能来自旧版迁移器，但 completed 已经证明目标端完成过首次导入；
+	// 版本升级只允许补齐新结构，不能借机重新接管目标端运行态。
+	return marker != nil && marker.Status == "completed"
 }
 
 func (m *PetMigrator) fail(ctx context.Context, report PetMigrationReport, startedAt int64, cause error) (PetMigrationReport, error) {

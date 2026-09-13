@@ -555,6 +555,17 @@
         "selectedCount": "已选 {count} 条",
         "totalCount": "共 {count} 条"
       },
+      "globalCleanup": {
+        "action": "全局清理",
+        "menuLabel": "按时间清理全局项目会话",
+        "busy": "正在清理全局会话详情",
+        "noSessions": "当前没有可清理的项目会话。",
+        "pruned": "已按 {range} 清理全局项目会话：{turns} 轮对话（{items} 条详情）；{empty} 个会话没有匹配内容，会话本身未删除。",
+        "noMatch": "已检查全局 {count} 个会话，没有匹配 {range} 的历史详情；会话本身未删除。",
+        "partial": "全局按 {range} 清理完成：{turns} 轮对话（{items} 条详情），{failed} 个会话失败；会话本身未删除。",
+        "failed": "全局按 {range} 清理失败：{failed} 个会话失败，未清理详情；会话本身未删除。",
+        "failureDetails": "失败项：{items}"
+      },
       "stats": {
         "visibleCount": "当前展示",
         "totalProjects": "项目总数",
@@ -736,6 +747,10 @@
         "batchSessionPruneTitle": "确认清理会话详情",
         "batchSessionPruneConfirm": "确认清理已选中的 {count} 个会话中超过 {range} 的对话详情吗？",
         "batchSessionPruneHint": "只会物理剪枝匹配时间范围的对话详情，会话本身和最近内容都会保留；此操作不可撤销。",
+        "globalSessionPruneTitle": "确认全局清理会话详情",
+        "globalSessionPruneConfirm": "确认清理全部 {count} 个项目会话中超过 {range} 的对话详情吗？",
+        "globalSessionPruneHint": "只会物理剪枝匹配时间范围的对话详情，不会删除项目会话；此操作不可撤销。",
+        "pruneConfirmAction": "确认清理",
         "batchSessionPruned": "已按 {range} 清理 {turns} 轮对话（{items} 条详情）；{empty} 个会话没有匹配内容，会话本身未删除。",
         "batchSessionPruneNoMatch": "已检查 {count} 个会话，没有匹配 {range} 的历史详情；会话本身未删除。",
         "batchSessionPrunePartial": "按 {range} 清理完成：{turns} 轮对话（{items} 条详情），{failed} 个会话失败；会话本身未删除。",

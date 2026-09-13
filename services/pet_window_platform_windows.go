@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -15,6 +16,11 @@ import (
 )
 
 const petWindowPlatformsChangedEvent = "pet.window.platforms.changed"
+
+// WinEvent 只负责让平台缓存失效；多个原生事件在一个短时间窗口内的结果
+// 等价，保留最新 revision 即可。后端节流保证高频 WinEvent 不会先在 Wails
+// 全局事件处理器中创建大量异步任务，再依赖前端 debounce 才收敛。
+const petWindowPlatformEventInterval = 100 * time.Millisecond
 
 const (
 	petPlatformEventObjectMin        = 0x8001
@@ -41,23 +47,29 @@ var (
 // petWindowPlatformMonitor 只负责 Win32 平台候选的发现和失效通知，不持有宠物动画状态。
 // 这样窗口事件即使高频到达，也不会跨线程直接修改 Vue 的 renderedPetX/renderedPetLift。
 type petWindowPlatformMonitor struct {
-	mu             sync.Mutex
-	app            *application.App
-	hwnd           windows.HWND
-	ownPID         uint32
-	hooks          []uintptr
-	callback       uintptr
-	started        bool
-	available      bool
-	revision       uint64
-	movingWindowID string
+	mu                    sync.Mutex
+	app                   *application.App
+	hwnd                  windows.HWND
+	ownPID                uint32
+	hooks                 []uintptr
+	callback              uintptr
+	started               bool
+	available             bool
+	revision              uint64
+	movingWindowID        string
+	emitEvent             func(revision uint64, movingWindowID string)
+	eventTimer            *time.Timer
+	eventGeneration       uint64
+	pendingEvent          bool
+	pendingRevision       uint64
+	pendingMovingWindowID string
 }
 
 func newPetWindowPlatformMonitor(app *application.App) *petWindowPlatformMonitor {
 	return &petWindowPlatformMonitor{app: app}
 }
 
-func (m *petWindowPlatformMonitor) Start(hwnd windows.HWND) error {
+func (m *petWindowPlatformMonitor) Start(hwnd windows.HWND, emitEvent func(revision uint64, movingWindowID string)) error {
 	if m == nil || hwnd == 0 {
 		return fmt.Errorf("pet platform monitor requires a window handle")
 	}
@@ -116,6 +128,11 @@ func (m *petWindowPlatformMonitor) Start(hwnd windows.HWND) error {
 	m.callback = callback
 	m.started = true
 	m.available = true
+	m.emitEvent = emitEvent
+	m.pendingEvent = false
+	m.pendingRevision = 0
+	m.pendingMovingWindowID = ""
+	m.eventGeneration++
 	m.revision++
 	m.mu.Unlock()
 	return nil
@@ -128,6 +145,7 @@ func (m *petWindowPlatformMonitor) Stop() {
 
 	m.mu.Lock()
 	hooks := append([]uintptr(nil), m.hooks...)
+	timer := m.eventTimer
 	m.hooks = nil
 	m.callback = 0
 	m.started = false
@@ -135,7 +153,16 @@ func (m *petWindowPlatformMonitor) Stop() {
 	m.hwnd = 0
 	m.ownPID = 0
 	m.movingWindowID = ""
+	m.emitEvent = nil
+	m.eventTimer = nil
+	m.eventGeneration++
+	m.pendingEvent = false
+	m.pendingRevision = 0
+	m.pendingMovingWindowID = ""
 	m.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 
 	if len(hooks) == 0 {
 		return
@@ -196,6 +223,48 @@ func (m *petWindowPlatformMonitor) GetPlatforms() (PetWindowPlatformSnapshot, er
 	}, nil
 }
 
+func (m *petWindowPlatformMonitor) queuePlatformEvent(revision uint64, movingWindowID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.queuePlatformEventLocked(revision, movingWindowID)
+}
+
+func (m *petWindowPlatformMonitor) queuePlatformEventLocked(revision uint64, movingWindowID string) {
+	if !m.started || !m.available || m.emitEvent == nil {
+		return
+	}
+	m.pendingEvent = true
+	m.pendingRevision = revision
+	m.pendingMovingWindowID = movingWindowID
+	if m.eventTimer != nil {
+		return
+	}
+	generation := m.eventGeneration
+	m.eventTimer = time.AfterFunc(petWindowPlatformEventInterval, func() {
+		m.flushPlatformEvent(generation)
+	})
+}
+
+func (m *petWindowPlatformMonitor) flushPlatformEvent(generation uint64) {
+	m.mu.Lock()
+	if generation != m.eventGeneration || !m.started || !m.available || !m.pendingEvent {
+		m.mu.Unlock()
+		return
+	}
+	revision := m.pendingRevision
+	movingWindowID := m.pendingMovingWindowID
+	emitEvent := m.emitEvent
+	m.pendingEvent = false
+	m.pendingRevision = 0
+	m.pendingMovingWindowID = ""
+	m.eventTimer = nil
+	m.mu.Unlock()
+
+	if emitEvent != nil {
+		emitEvent(revision, movingWindowID)
+	}
+}
+
 func (m *petWindowPlatformMonitor) handleWinEvent(
 	hook uintptr,
 	event uintptr,
@@ -232,7 +301,6 @@ func (m *petWindowPlatformMonitor) handleWinEvent(
 		m.mu.Unlock()
 		return 0
 	}
-	app := m.app
 	if eventID == petPlatformEventSystemMoveStart {
 		m.movingWindowID = fmt.Sprintf("%#x", uintptr(eventHWND))
 	} else if eventID == petPlatformEventSystemMoveEnd &&
@@ -244,16 +312,8 @@ func (m *petWindowPlatformMonitor) handleWinEvent(
 	movingWindowID := m.movingWindowID
 	m.revision++
 	revision := m.revision
+	m.queuePlatformEventLocked(revision, movingWindowID)
 	m.mu.Unlock()
-
-	if app != nil {
-		// 事件只表达“缓存失效”，窗口矩形仍由下一次 GetPlatforms 读取，
-		// 避免把 WinEvent 回调线程变成第二个平台状态 owner。
-		app.Event.Emit(petWindowPlatformsChangedEvent, map[string]any{
-			"revision":       revision,
-			"movingWindowId": movingWindowID,
-		})
-	}
 	return 0
 }
 

@@ -65,6 +65,22 @@ type petWindowPointerSample struct {
 
 const petWindowPointerEvent = "pet.window.pointer"
 
+// dispatchPetWindowEvent 只把桌宠运行时事件送到桌宠自己的 renderer。
+// Wails alpha.38 的 Window.EmitEvent 实际会回到全局 EventProcessor，再广播给
+// 所有窗口；指针和平台失效事件是高频、单消费者消息，不应占用全局事件队列。
+func dispatchPetWindowEvent(window application.Window, name string, data any) {
+	if window == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	window.DispatchWailsEvent(&application.CustomEvent{
+		Name: name,
+		// 保持与 Window.EmitEvent(name, data) 相同的单元素数组形状；旧版
+		// renderer 已兼容对象和数组，但统一形状能避免其它监听器出现隐性分支。
+		Data:   []any{data},
+		Sender: window.Name(),
+	})
+}
+
 const (
 	petWindowHWNDTopMost      = ^uintptr(0)
 	petWindowHWNDNoTopMost    = ^uintptr(1)
@@ -569,10 +585,30 @@ func (d *wailsPetWindowDriver) SetWindowClosedCallback(callback func()) {
 	d.windowClosedFn = callback
 }
 
+func (d *wailsPetWindowDriver) currentPetWindow(requireShown bool) (application.Window, uint64, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.window == nil || d.closingVersion == d.windowVersion || (requireShown && !d.windowShown) {
+		return nil, 0, false
+	}
+	return d.window, d.windowVersion, true
+}
+
+// isCurrentPetWindow 是异步原生回调的第二道生命周期校验。第一道校验只能
+// 保护取快照时的状态；窗口可能在 Win32 调用或 bridge 投递期间被关闭/重建。
+func (d *wailsPetWindowDriver) isCurrentPetWindow(window application.Window, version uint64, requireShown bool) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.window == window &&
+		d.windowVersion == version &&
+		d.closingVersion != version &&
+		(!requireShown || d.windowShown)
+}
+
 func (d *wailsPetWindowDriver) CaptureFocusRestore() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.window == nil {
+	if d.window == nil || d.closingVersion == d.windowVersion {
 		return
 	}
 	petHWND := windows.HWND(uintptr(d.window.NativeWindow()))
@@ -718,7 +754,8 @@ func (d *wailsPetWindowDriver) Close() error {
 		d.mu.Unlock()
 		return nil
 	}
-	d.closingVersion = d.windowVersion
+	version := d.windowVersion
+	d.closingVersion = version
 	d.stopPointerTrackingLocked()
 	monitor := d.platforms
 	d.mu.Unlock()
@@ -732,7 +769,7 @@ func (d *wailsPetWindowDriver) Close() error {
 	// Wails 仍会继续处理已经发出的关闭请求。
 	window.Hide()
 	d.mu.Lock()
-	d.detachPetWindowLocked(window, d.windowVersion)
+	d.detachPetWindowLocked(window, version)
 	d.mu.Unlock()
 	return nil
 }
@@ -781,16 +818,20 @@ func (d *wailsPetWindowDriver) cleanupFailedPetWindow(window application.Window,
 }
 
 func (d *wailsPetWindowDriver) SetIgnoreMouseEvents(ignore bool) error {
-	d.mu.Lock()
-	window := d.window
-	d.mu.Unlock()
-	if window == nil {
+	window, version, ok := d.currentPetWindow(false)
+	if !ok {
 		return nil
+	}
+	if !d.isCurrentPetWindow(window, version, false) {
+		return ErrPetWindowNotReady
 	}
 
 	hwnd, err := petWindowHWND(window)
 	if err != nil {
 		return fmt.Errorf("set ignore mouse events: %w", err)
+	}
+	if !d.isCurrentPetWindow(window, version, false) {
+		return ErrPetWindowNotReady
 	}
 	foregroundBefore := windows.GetForegroundWindow()
 	startedAt := time.Now()
@@ -811,6 +852,9 @@ func (d *wailsPetWindowDriver) SetIgnoreMouseEvents(ignore bool) error {
 			err.Error(),
 		))
 		return fmt.Errorf("set ignore mouse events: %w", err)
+	}
+	if !d.isCurrentPetWindow(window, version, false) {
+		return ErrPetWindowNotReady
 	}
 
 	foregroundAfter := windows.GetForegroundWindow()
@@ -939,14 +983,22 @@ func (d *wailsPetWindowDriver) SetSize(width, height int) error {
 }
 
 func (d *wailsPetWindowDriver) SetAlwaysOnTop(alwaysOnTop bool) error {
+	window, version, ok := d.currentPetWindow(false)
 	d.mu.Lock()
-	window := d.window
-	d.alwaysOnTop = alwaysOnTop
+	if d.window == window && d.windowVersion == version {
+		d.alwaysOnTop = alwaysOnTop
+	}
 	d.mu.Unlock()
 	if window != nil {
+		if !ok || !d.isCurrentPetWindow(window, version, false) {
+			return ErrPetWindowNotReady
+		}
 		hwnd, err := petWindowHWND(window)
 		if err != nil {
 			return fmt.Errorf("set pet window always-on-top: %w", err)
+		}
+		if !d.isCurrentPetWindow(window, version, false) {
+			return ErrPetWindowNotReady
 		}
 		if err := petWindowEnsureNoActivate(hwnd); err != nil {
 			return fmt.Errorf("set pet window noactivate: %w", err)
@@ -972,15 +1024,16 @@ func (d *wailsPetWindowDriver) SetAlwaysOnTop(alwaysOnTop bool) error {
 }
 
 func (d *wailsPetWindowDriver) SetPlatformLayer(platformID string) (bool, error) {
-	d.mu.Lock()
-	window := d.window
-	d.mu.Unlock()
-	if window == nil {
+	window, version, ok := d.currentPetWindow(false)
+	if !ok {
 		return false, nil
 	}
 
 	topMost := false
 	err := application.InvokeSyncWithError(func() error {
+		if !d.isCurrentPetWindow(window, version, false) {
+			return ErrPetWindowNotReady
+		}
 		hwnd, err := petWindowHWND(window)
 		if err != nil {
 			return err
@@ -995,9 +1048,17 @@ func (d *wailsPetWindowDriver) SetPlatformLayer(platformID string) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("set pet window platform layer: %w", err)
 	}
+	if !d.isCurrentPetWindow(window, version, false) {
+		return false, ErrPetWindowNotReady
+	}
 
 	d.mu.Lock()
-	d.alwaysOnTop = topMost
+	if d.window == window && d.windowVersion == version {
+		d.alwaysOnTop = topMost
+	} else {
+		d.mu.Unlock()
+		return false, ErrPetWindowNotReady
+	}
 	d.mu.Unlock()
 	return topMost, nil
 }
@@ -1041,7 +1102,7 @@ func (d *wailsPetWindowDriver) handleWindowClosing(version uint64) {
 func (d *wailsPetWindowDriver) handleWindowNavigationCompleted(version uint64, window application.Window) {
 	WriteRuntimeDiagnostic("pet-navigation-completed", fmt.Sprintf("version=%d", version))
 	d.mu.Lock()
-	if d.window != window || d.windowVersion != version || d.windowShown || d.windowShowing {
+	if d.window != window || d.windowVersion != version || d.closingVersion == version || d.windowShown || d.windowShowing {
 		d.mu.Unlock()
 		return
 	}
@@ -1063,7 +1124,7 @@ func (d *wailsPetWindowDriver) handleWindowNavigationCompleted(version uint64, w
 	WriteRuntimeDiagnostic("pet-navigation-show-completed", fmt.Sprintf("version=%d topmost=%t", version, topMost))
 
 	d.mu.Lock()
-	if d.window != window || d.windowVersion != version {
+	if d.window != window || d.windowVersion != version || d.closingVersion == version {
 		d.mu.Unlock()
 		return
 	}
@@ -1084,29 +1145,44 @@ func (d *wailsPetWindowDriver) handleWindowNavigationCompleted(version uint64, w
 
 func (d *wailsPetWindowDriver) startPlatformMonitor(version uint64, window application.Window) {
 	d.mu.Lock()
-	if d.window != window || d.windowVersion != version || !d.windowShown || d.platforms == nil {
+	if d.window != window || d.windowVersion != version || d.closingVersion == version || !d.windowShown || d.platforms == nil {
 		d.mu.Unlock()
 		return
 	}
 	monitor := d.platforms
-	hwnd := windows.HWND(uintptr(window.NativeWindow()))
 	d.mu.Unlock()
 
-	if hwnd == 0 {
-		return
-	}
 	err := application.InvokeSyncWithError(func() error {
-		return monitor.Start(hwnd)
+		if !d.isCurrentPetWindow(window, version, true) {
+			return ErrPetWindowNotReady
+		}
+		hwnd, err := petWindowHWND(window)
+		if err != nil {
+			return err
+		}
+		return monitor.Start(hwnd, func(revision uint64, movingWindowID string) {
+			d.emitPlatformEvent(version, window, revision, movingWindowID)
+		})
 	})
 	if err != nil {
-		WriteRuntimeDiagnostic("pet-platform-monitor-start-failed", fmt.Sprintf("hwnd=%#x err=%q", uintptr(hwnd), err.Error()))
+		WriteRuntimeDiagnostic("pet-platform-monitor-start-failed", fmt.Sprintf("version=%d err=%q", version, err.Error()))
 		log.Printf("[PetWindow] 启动窗口平台监视失败: %v", err)
 	}
 }
 
+func (d *wailsPetWindowDriver) emitPlatformEvent(version uint64, window application.Window, revision uint64, movingWindowID string) {
+	if !d.isCurrentPetWindow(window, version, true) {
+		return
+	}
+	dispatchPetWindowEvent(window, petWindowPlatformsChangedEvent, map[string]any{
+		"revision":       revision,
+		"movingWindowId": movingWindowID,
+	})
+}
+
 func (d *wailsPetWindowDriver) startPointerTracking(version uint64, window application.Window) {
 	d.mu.Lock()
-	if d.window != window || d.windowVersion != version || d.pointerStop != nil {
+	if d.window != window || d.windowVersion != version || d.closingVersion == version || d.pointerStop != nil {
 		d.mu.Unlock()
 		return
 	}
@@ -1139,16 +1215,12 @@ func (d *wailsPetWindowDriver) stopPointerTrackingLocked() {
 }
 
 func (d *wailsPetWindowDriver) emitPointerLocation(version uint64, window application.Window) {
-	d.mu.Lock()
-	currentWindow := d.window
-	currentVersion := d.windowVersion
-	d.mu.Unlock()
-	if currentWindow != window || currentVersion != version {
+	if !d.isCurrentPetWindow(window, version, true) {
 		return
 	}
 
-	hwnd := uintptr(window.NativeWindow())
-	if hwnd == 0 {
+	hwnd, err := petWindowHWND(window)
+	if err != nil || !d.isCurrentPetWindow(window, version, true) {
 		return
 	}
 	var cursor petWindowPoint
@@ -1156,7 +1228,7 @@ func (d *wailsPetWindowDriver) emitPointerLocation(version uint64, window applic
 	if result, _, _ := getCursorPosProc.Call(uintptr(unsafe.Pointer(&cursor))); result == 0 {
 		return
 	}
-	if result, _, _ := getWindowRectProc.Call(hwnd, uintptr(unsafe.Pointer(&bounds))); result == 0 {
+	if result, _, _ := getWindowRectProc.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&bounds))); result == 0 {
 		return
 	}
 
@@ -1179,7 +1251,10 @@ func (d *wailsPetWindowDriver) emitPointerLocation(version uint64, window applic
 	d.pointerSample = sample
 	d.mu.Unlock()
 
-	window.EmitEvent(petWindowPointerEvent, map[string]any{
+	if !d.isCurrentPetWindow(window, version, true) {
+		return
+	}
+	dispatchPetWindowEvent(window, petWindowPointerEvent, map[string]any{
 		"screenX":      sample.screenX,
 		"screenY":      sample.screenY,
 		"windowX":      sample.windowX,

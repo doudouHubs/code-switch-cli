@@ -260,3 +260,73 @@ func TestPetMigrationSourceFingerprintChangesWhenSettingsChanges(t *testing.T) {
 		t.Fatalf("fingerprints = %q/%q", first, second)
 	}
 }
+
+func TestPetMigrationSourceChangesDoNotOverwriteRuntimeProgress(t *testing.T) {
+	source := t.TempDir()
+	writeSettings := func(growth, totalExp float64) {
+		t.Helper()
+		settings := map[string]any{
+			OpenCoworkPetStateKey: map[string]any{
+				"state": map[string]any{"name": "Legacy", "growth": growth, "coinCreditedExp": totalExp},
+			},
+			OpenCoworkPetExperienceKey: map[string]any{
+				"state": map[string]any{"totalExp": totalExp, "totalTokens": 100},
+			},
+		}
+		raw, err := json.Marshal(settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, "settings.json"), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSettings(120, 500)
+
+	db := newPetMigrationTestDB(t)
+	dao := NewPetDAO(db)
+	migrator := NewPetMigrator(dao, source)
+	migrator.now = func() int64 { return 1_700_000_000_000 }
+	if _, err := migrator.Migrate(context.Background()); err != nil {
+		t.Fatalf("first migration error = %v", err)
+	}
+
+	// 模拟首次迁移后目标端已经产生了新的运行态；旧源随后回退到更小值时，
+	// 回归测试必须确保成长、经验总账和同 ID 日志都不被旧快照覆盖。
+	currentState := DefaultPetStateAt(1_700_000_000_000)
+	currentState.PetID = DefaultPetID
+	currentState.Name = "Kapi"
+	currentState.Growth = 90_000
+	currentState.Coins = 777
+	currentState.CoinCreditedExp = 25_000
+	currentExperience := PetExperience{PetID: DefaultPetID, TotalExp: 25_000, TotalTokens: 999}
+	if err := dao.SaveSnapshot(context.Background(), PetMigrationSnapshot{
+		PetID:      DefaultPetID,
+		State:      &currentState,
+		Experience: &currentExperience,
+		ExpLog: []PetExpLogEntry{{
+			PetID: DefaultPetID, ID: "legacy-exp", At: 1, Model: "target", Tokens: 999, Exp: 999,
+		}},
+	}); err != nil {
+		t.Fatalf("save current runtime progress = %v", err)
+	}
+
+	writeSettings(1, 2)
+	if _, err := migrator.Migrate(context.Background()); err != nil {
+		t.Fatalf("changed-source migration error = %v", err)
+	}
+
+	snapshot, err := dao.LoadSnapshot(context.Background(), DefaultPetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.State == nil || snapshot.State.Growth != 90_000 || snapshot.State.Coins != 777 || snapshot.State.CoinCreditedExp != 25_000 {
+		t.Fatalf("runtime state was overwritten: %#v", snapshot.State)
+	}
+	if snapshot.Experience == nil || snapshot.Experience.TotalExp != 25_000 || snapshot.Experience.TotalTokens != 999 {
+		t.Fatalf("runtime experience was overwritten: %#v", snapshot.Experience)
+	}
+	if len(snapshot.ExpLog) != 1 || snapshot.ExpLog[0].ID != "legacy-exp" || snapshot.ExpLog[0].Exp != 999 {
+		t.Fatalf("runtime experience log was overwritten: %#v", snapshot.ExpLog)
+	}
+}

@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,17 +14,22 @@ import (
 )
 
 type channelChatRuntimeStub struct {
-	mu       sync.Mutex
-	requests []services.PetChatRequest
-	startErr error
-	closed   bool
+	mu          sync.Mutex
+	requests    []services.PetChatRequest
+	startErr    error
+	beforeStart func()
+	closed      bool
 }
 
 func (s *channelChatRuntimeStub) StartChat(_ context.Context, request services.PetChatRequest) (services.PetChatStartResult, error) {
 	s.mu.Lock()
 	s.requests = append(s.requests, request)
 	err := s.startErr
+	beforeStart := s.beforeStart
 	s.mu.Unlock()
+	if beforeStart != nil {
+		beforeStart()
+	}
 	if err != nil {
 		return services.PetChatStartResult{}, err
 	}
@@ -114,6 +120,197 @@ func TestAgentRuntimeRoutesIncomingMessageToSharedProjectCodexRuntime(t *testing
 	}
 }
 
+func TestAgentRuntimeSendsThinkingAcknowledgementBeforeStartingAgent(t *testing.T) {
+	chatRuntime := &channelChatRuntimeStub{}
+	store, manager, instance := newChannelRuntimeFixture(t, chatRuntime)
+	defer store.Close()
+	defer manager.Stop(context.Background(), instance.ID)
+
+	provider, err := manager.provider(instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testProvider, ok := provider.(*channelToolTestProvider)
+	if !ok {
+		t.Fatalf("provider type = %T", provider)
+	}
+	var orderErr error
+	chatRuntime.beforeStart = func() {
+		testProvider.mu.Lock()
+		defer testProvider.mu.Unlock()
+		if len(testProvider.sent) != 1 || testProvider.sent[0] != "chat-a:..." {
+			orderErr = fmt.Errorf("Agent started before acknowledgement: %#v", testProvider.sent)
+		}
+	}
+
+	runtime := NewAgentRuntime(store, manager, nil, nil, AgentRuntimeOptions{ChatRuntime: chatRuntime})
+	runtime.handleIncoming(ChannelMessage{
+		InstanceID: instance.ID,
+		ExternalID: "incoming-ack-order",
+		Role:       "user",
+		ChatID:     "chat-a",
+		Content:    "先确认再处理",
+		Timestamp:  nowMillis(),
+	})
+	if orderErr != nil {
+		t.Fatal(orderErr)
+	}
+
+	session, found, err := store.GetSession(instance.ID, "chat-a")
+	if err != nil || !found {
+		t.Fatalf("session = %#v, found=%t, err=%v", session, found, err)
+	}
+	messages, err := store.ListMessages(session.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackCount := 0
+	for _, message := range messages {
+		if message.Role == "assistant" && message.Content == channelThinkingAcknowledgement {
+			ackCount++
+		}
+	}
+	if ackCount != 1 {
+		t.Fatalf("thinking acknowledgement history count = %d, messages = %#v", ackCount, messages)
+	}
+}
+
+func TestAgentRuntimeDoesNotDuplicateThinkingAcknowledgementForDuplicateIncomingMessage(t *testing.T) {
+	chatRuntime := &channelChatRuntimeStub{startErr: errors.New("stop after acknowledgement")}
+	store, manager, instance := newChannelRuntimeFixture(t, chatRuntime)
+	defer store.Close()
+	defer manager.Stop(context.Background(), instance.ID)
+
+	runtime := NewAgentRuntime(store, manager, nil, nil, AgentRuntimeOptions{ChatRuntime: chatRuntime})
+	message := ChannelMessage{
+		InstanceID: instance.ID,
+		ExternalID: "incoming-ack-duplicate",
+		Role:       "user",
+		ChatID:     "chat-a",
+		Content:    "只处理一次",
+		Timestamp:  nowMillis(),
+	}
+	runtime.handleIncoming(message)
+	runtime.handleIncoming(message)
+
+	provider, err := manager.provider(instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testProvider, ok := provider.(*channelToolTestProvider)
+	if !ok {
+		t.Fatalf("provider type = %T", provider)
+	}
+	testProvider.mu.Lock()
+	sent := append([]string(nil), testProvider.sent...)
+	testProvider.mu.Unlock()
+	ackCount := 0
+	for _, value := range sent {
+		if value == "chat-a:..." {
+			ackCount++
+		}
+	}
+	if ackCount != 1 {
+		t.Fatalf("thinking acknowledgement count = %d, sent = %#v", ackCount, sent)
+	}
+	chatRuntime.mu.Lock()
+	requestCount := len(chatRuntime.requests)
+	chatRuntime.mu.Unlock()
+	if requestCount != 1 {
+		t.Fatalf("duplicate message started %d Agent requests", requestCount)
+	}
+}
+
+func TestAgentRuntimeContinuesAgentWhenThinkingAcknowledgementFails(t *testing.T) {
+	chatRuntime := &channelChatRuntimeStub{}
+	store, manager, instance := newChannelRuntimeFixture(t, chatRuntime)
+	defer store.Close()
+	defer manager.Stop(context.Background(), instance.ID)
+
+	provider, err := manager.provider(instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testProvider, ok := provider.(*channelToolTestProvider)
+	if !ok {
+		t.Fatalf("provider type = %T", provider)
+	}
+	testProvider.mu.Lock()
+	testProvider.sendErr = errors.New("ack channel unavailable")
+	testProvider.mu.Unlock()
+
+	events := make([]ChannelEvent, 0)
+	runtime := NewAgentRuntime(store, manager, nil, func(event ChannelEvent) {
+		events = append(events, event)
+	}, AgentRuntimeOptions{ChatRuntime: chatRuntime})
+	runtime.handleIncoming(ChannelMessage{
+		InstanceID: instance.ID,
+		ExternalID: "incoming-ack-failure",
+		Role:       "user",
+		ChatID:     "chat-a",
+		Content:    "回执失败也要继续处理",
+		Timestamp:  nowMillis(),
+	})
+
+	chatRuntime.mu.Lock()
+	requestCount := len(chatRuntime.requests)
+	chatRuntime.mu.Unlock()
+	if requestCount != 1 {
+		t.Fatalf("ack failure stopped Agent request, requests = %d", requestCount)
+	}
+	ackErrorFound := false
+	for _, event := range events {
+		if event.Type == "error" && strings.Contains(event.Data.(string), "thinking acknowledgement") {
+			ackErrorFound = true
+			break
+		}
+	}
+	if !ackErrorFound {
+		t.Fatalf("ack failure error event not found: %#v", events)
+	}
+}
+
+func TestAgentRuntimeSkipsThinkingAcknowledgementWhenAutoReplyDisabled(t *testing.T) {
+	chatRuntime := &channelChatRuntimeStub{}
+	store, manager, instance := newChannelRuntimeFixture(t, chatRuntime)
+	defer store.Close()
+	defer manager.Stop(context.Background(), instance.ID)
+
+	instance.Features.AutoReply = false
+	if err := store.UpsertInstance(instance); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewAgentRuntime(store, manager, nil, nil, AgentRuntimeOptions{ChatRuntime: chatRuntime})
+	runtime.handleIncoming(ChannelMessage{
+		InstanceID: instance.ID,
+		ExternalID: "incoming-auto-reply-disabled",
+		Role:       "user",
+		ChatID:     "chat-a",
+		Content:    "不应自动回复",
+		Timestamp:  nowMillis(),
+	})
+
+	chatRuntime.mu.Lock()
+	requestCount := len(chatRuntime.requests)
+	chatRuntime.mu.Unlock()
+	if requestCount != 0 {
+		t.Fatalf("AutoReply=false started %d Agent requests", requestCount)
+	}
+	provider, err := manager.provider(instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testProvider, ok := provider.(*channelToolTestProvider)
+	if !ok {
+		t.Fatalf("provider type = %T", provider)
+	}
+	testProvider.mu.Lock()
+	defer testProvider.mu.Unlock()
+	if len(testProvider.sent) != 0 {
+		t.Fatalf("AutoReply=false sent messages = %#v", testProvider.sent)
+	}
+}
+
 func TestAgentRuntimeSendsFailureWhenCodexRuntimeCannotStart(t *testing.T) {
 	chatRuntime := &channelChatRuntimeStub{startErr: errors.New("codex app-server unavailable")}
 	store, manager, instance := newChannelRuntimeFixture(t, chatRuntime)
@@ -140,7 +337,7 @@ func TestAgentRuntimeSendsFailureWhenCodexRuntimeCannotStart(t *testing.T) {
 	}
 	testProvider.mu.Lock()
 	defer testProvider.mu.Unlock()
-	if len(testProvider.sent) != 1 || !strings.Contains(testProvider.sent[0], "上游错误") || strings.Contains(testProvider.sent[0], "默认模型") {
+	if len(testProvider.sent) != 2 || testProvider.sent[0] != "chat-a:..." || !strings.Contains(testProvider.sent[1], "上游错误") || strings.Contains(testProvider.sent[1], "默认模型") {
 		t.Fatalf("failure message = %#v", testProvider.sent)
 	}
 }
@@ -218,8 +415,8 @@ func TestAgentRuntimeReportsPersonaFailureFromSharedHub(t *testing.T) {
 		testProvider.mu.Lock()
 		messages := append([]string(nil), testProvider.sent...)
 		testProvider.mu.Unlock()
-		if len(messages) > 0 {
-			if len(messages) != 1 || !strings.Contains(messages[0], "Codex CLI 当前不可用") || strings.Contains(messages[0], "默认模型") || strings.Contains(messages[0], "未配置") {
+		if len(messages) > 1 {
+			if len(messages) != 2 || messages[0] != "chat-a:..." || !strings.Contains(messages[1], "Codex CLI 当前不可用") || strings.Contains(messages[1], "默认模型") || strings.Contains(messages[1], "未配置") {
 				t.Fatalf("persona failure message = %#v", messages)
 			}
 			return
@@ -340,7 +537,7 @@ func TestAgentRuntimeBroadcastProjectDeliversOriginalAndConfiguredTargetOnce(t *
 	}
 
 	sourceProvider.mu.Lock()
-	if len(sourceProvider.replied) != 1 || sourceProvider.replied[0] != "source-message:agent answer" || len(sourceProvider.sent) != 0 {
+	if len(sourceProvider.replied) != 1 || sourceProvider.replied[0] != "source-message:agent answer" || len(sourceProvider.sent) != 1 || sourceProvider.sent[0] != "source-chat:..." {
 		t.Fatalf("source provider delivery = replied:%#v sent:%#v", sourceProvider.replied, sourceProvider.sent)
 	}
 	sourceProvider.mu.Unlock()

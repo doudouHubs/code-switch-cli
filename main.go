@@ -209,6 +209,7 @@ func (a *AppService) OpenSecondWindow() {
 // and starts a goroutine that emits a time-based event every second. It subsequently runs the application and
 // logs any error that might occur.
 func main() {
+	services.ConfigureRuntimeCrashOutput()
 	services.WriteRuntimeDiagnostic("main-start", fmt.Sprintf("args=%q", os.Args[1:]))
 	defer services.WriteRuntimeDiagnostic("main-exit")
 

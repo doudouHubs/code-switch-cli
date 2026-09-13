@@ -17,6 +17,7 @@ type channelToolTestProvider struct {
 	mu       sync.Mutex
 	sent     []string
 	replied  []string
+	sendErr  error
 	running  bool
 	groups   []ChannelGroup
 	history  []ChannelMessage
@@ -43,6 +44,9 @@ func (p *channelToolTestProvider) IsRunning() bool {
 func (p *channelToolTestProvider) SendMessage(_ context.Context, chatID, content string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.sendErr != nil {
+		return "", p.sendErr
+	}
 	p.sent = append(p.sent, chatID+":"+content)
 	return "provider-message-1", nil
 }

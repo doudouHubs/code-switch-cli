@@ -78,6 +78,12 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+function hasChatProjectBinding(agent: PetAgentConfig | null | undefined): boolean {
+  // Agent 管家历史按项目 ID 归属 thread；projectFolder 只是旧版持久化路径，
+  // 可能残留或已失效，不能让它绕过当前项目选择门禁并触发错误历史读取。
+  return Boolean(agent?.projectId?.trim())
+}
+
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message
   if (typeof error === 'string') return error
@@ -247,6 +253,17 @@ async function loadHistory(options: LoadHistoryOptions = {}): Promise<boolean> {
   const requestIdAtStart = activeRequestId
   cancelActiveCall()
   const showLoading = options.showLoading !== false
+
+  if (!hasChatProjectBinding(props.agent)) {
+    // 未绑定项目时后端必然返回 workspace/dependency 错误；在前端提前收敛为
+    // 可操作的设置提示，避免把配置缺失伪装成“对话读取失败”。
+    loading.value = false
+    errorMessage.value = ''
+    lastHistoryErrorWasInFlight = false
+    replaceMessages([], true)
+    return false
+  }
+
   if (showLoading) loading.value = true
   errorMessage.value = ''
   lastHistoryErrorWasInFlight = false
@@ -422,7 +439,7 @@ onMounted(() => {
         class="pet-chat-history-panel__refresh"
         :aria-label="t('pet.common.refresh')"
         :title="t('pet.common.refresh')"
-        :disabled="loading || Boolean(activeRequestId)"
+        :disabled="loading || Boolean(activeRequestId) || !hasChatProjectBinding(props.agent)"
         @click="void loadHistory()"
       >
         <RefreshCw :size="15" :class="{ 'is-spinning': loading }" aria-hidden="true" />
@@ -437,6 +454,9 @@ onMounted(() => {
       >
         <div v-if="loading && messages.length === 0" class="pet-chat-history-panel__state">
           {{ t('pet.chatHistory.loading') }}
+        </div>
+        <div v-else-if="!hasChatProjectBinding(props.agent)" class="pet-chat-history-panel__state">
+          {{ props.agent ? t('pet.chat.availability.bindingRequired') : t('pet.chat.availability.loading') }}
         </div>
         <div v-else-if="errorMessage && messages.length === 0" class="pet-chat-history-panel__state is-error">
           <span>{{ errorMessage }}</span>

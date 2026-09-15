@@ -183,6 +183,17 @@ func TestPackPetAtlasGeneratesDeterministicActionRowsAndFrameBounds(t *testing.T
 	}
 }
 
+func TestCanonicalPetAtlasActionOrderIncludesWorkBeforeHeld(t *testing.T) {
+	// work 是前端新增的标准行为；排序契约必须把它放在 held 前，避免前后端
+	// 对同一 atlas 的动作行产生不同解释。
+	if got, want := canonicalActionIndex("work"), canonicalActionIndex("play")+1; got != want {
+		t.Fatalf("canonicalActionIndex(work) = %d, want %d", got, want)
+	}
+	if work, held := canonicalActionIndex("work"), canonicalActionIndex("held"); work >= held {
+		t.Fatalf("canonical action order puts work=%d after held=%d", work, held)
+	}
+}
+
 func TestPackPetAtlasRejectsDuplicateEmptyAndOversizedActions(t *testing.T) {
 	frame := opaqueRect(2, 2, image.Rect(0, 0, 2, 2), color.NRGBA{A: 255})
 	tests := []struct {

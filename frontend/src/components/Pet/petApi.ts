@@ -803,11 +803,13 @@ function fallbackAction(snapshot: PetSnapshot, action: PetInteractionAction, now
   } else if (action === 'feed') {
     if (state.hunger >= 95) return { ...failure('full'), snapshot: settled }
     if (state.coins < 10) return { ...failure('coins'), snapshot: settled }
-    nextState = { ...state, coins: state.coins - 10, hunger: clamp(state.hunger + 35), mood: clamp(state.mood + 2) }
+    // fallback 必须镜像 Go 规则；喂食不应顺便修改心情或清洁度。
+    nextState = { ...state, coins: state.coins - 10, hunger: clamp(state.hunger + 35) }
   } else if (action === 'bathe') {
     if (state.cleanliness >= 95) return { ...failure('clean'), snapshot: settled }
     if (state.coins < 6) return { ...failure('coins'), snapshot: settled }
-    nextState = { ...state, coins: state.coins - 6, cleanliness: clamp(state.cleanliness + 45), mood: clamp(state.mood + 1) }
+    // fallback 与后端保持同一动作边界：洗澡只修改清洁度和对应金币成本。
+    nextState = { ...state, coins: state.coins - 6, cleanliness: clamp(state.cleanliness + 45) }
   } else if (action === 'soak') {
     if (getPetLevel(totalGrowth) < 2) return { ...failure('level'), snapshot: settled }
     if (state.coins < 15) return { ...failure('coins'), snapshot: settled }
@@ -860,22 +862,6 @@ function normalizeActionResult(value: unknown, petId = DEFAULT_PET_ID): PetActio
     ...(reward ? { reward } : {}),
     ...(state ? { state } : {})
   }
-}
-
-export function settlePetRuntimeState(state: PetState, now = Date.now()): PetState {
-  const current = clone(state)
-  const lastTickAt = current.lastTickAt > 0 ? current.lastTickAt : now
-  if (current.sleeping && current.sleepEndsAt > 0 && now >= current.sleepEndsAt) {
-    // 睡眠跨过结束点时分两段结算，保证恢复心情不会延伸到醒来之后；这与
-    // OpenCowork pet-store 的 tick 规则一致，renderer 可以在后端事件到达前保持稳定显示。
-    const slept = applyDecay({ ...current, lastTickAt }, current.sleepEndsAt - lastTickAt)
-    const awake = applyDecay(
-      { ...slept, sleeping: false, sleepEndsAt: 0, lastTickAt: current.sleepEndsAt },
-      now - current.sleepEndsAt
-    )
-    return { ...awake, sleeping: false, sleepEndsAt: 0, lastTickAt: now }
-  }
-  return { ...applyDecay({ ...current, lastTickAt }, now - lastTickAt), lastTickAt: now }
 }
 
 function isRuntimeUnavailable(error: unknown): boolean {

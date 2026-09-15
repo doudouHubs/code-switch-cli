@@ -1,6 +1,11 @@
 version: '3'
 
 tasks:
+  pet:build:
+    summary: Builds the standalone pet executable for the current release
+    cmds:
+      - task --taskfile "{{.ROOT_DIR}}/build/pet/Taskfile.yml" build PRODUCTION={{.PRODUCTION | default "false"}} ARCH={{.ARCH | default "amd64"}}
+
   go:mod:tidy:
     summary: Runs `go mod tidy`
     internal: true

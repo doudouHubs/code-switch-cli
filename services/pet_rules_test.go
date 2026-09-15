@@ -68,15 +68,15 @@ func TestPetCareActions(t *testing.T) {
 	state.Coins = 100
 
 	state, result := PetFeed(state)
-	if !result.OK || state.Coins != 90 || state.Hunger != 85 || state.Mood != 72 {
+	if !result.OK || state.Coins != 90 || state.Hunger != 85 || state.Cleanliness != 40 || state.Mood != 70 {
 		t.Fatalf("feed result/state mismatch: %#v %#v", result, state)
 	}
 	state, result = PetBathe(state)
-	if !result.OK || state.Coins != 84 || state.Cleanliness != 85 || state.Mood != 73 {
+	if !result.OK || state.Coins != 84 || state.Hunger != 85 || state.Cleanliness != 85 || state.Mood != 70 {
 		t.Fatalf("bathe result/state mismatch: %#v %#v", result, state)
 	}
 	state, result = PetSoak(state, GetGrowthForLevel(2))
-	if !result.OK || state.Coins != 69 || state.Cleanliness != 100 || state.Mood != 100 {
+	if !result.OK || state.Coins != 69 || state.Cleanliness != 100 || state.Mood != 98 {
 		t.Fatalf("soak result/state mismatch: %#v %#v", result, state)
 	}
 	state.Hunger = 10

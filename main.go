@@ -765,42 +765,78 @@ func main() {
 		}
 	}()
 
-	var petWindow *services.PetWindow
-	petWindow, petWindowErr := services.NewPetWindow(app, services.PetWindowOptions{
-		Name:  services.DefaultPetWindowName,
-		Title: services.DefaultPetWindowTitle,
-		// 与 OpenCowork 的 appView=pet 入口保持一致；独立窗口必须绕过主应用
-		// App.vue，否则会把 Sidebar 和普通路由布局一起渲染进透明桌宠窗。
-		URL:    "/?appView=pet",
-		Width:  services.DefaultPetWindowWidth,
-		Height: services.DefaultPetWindowHeight,
-	})
-	if petWindowErr != nil {
-		services.WriteRuntimeDiagnostic("pet-window-create-failed", fmt.Sprintf("err=%q", petWindowErr.Error()))
-		log.Printf("⚠️ 宠物窗口初始化失败: %v", petWindowErr)
-	} else {
-		// 桌宠不再永久置顶；打开后由平台运行时根据当前站立窗口同步 Z 序。
+	petProcess, petProcessErr := newPetProcessManager()
+	if petProcessErr != nil {
+		// 自动模式的“无实例且无 EXE”已在 newPetProcessManager 内部明确回退；
+		// 这里出现错误说明管道存在但协议/权限/连接异常，继续创建内嵌窗口会
+		// 直接制造两个宠物，因此统一 fail fast。
+		services.WriteRuntimeDiagnostic("pet-process-create-failed", fmt.Sprintf("err=%q", petProcessErr.Error()))
+		log.Fatalf("独立宠物进程初始化失败: %v", petProcessErr)
+	}
 
-		windowConfig, configErr := petService.GetWindowConfig()
-		if configErr != nil {
-			services.WriteRuntimeDiagnostic("pet-window-config-read-failed", fmt.Sprintf("err=%q", configErr.Error()))
-			log.Printf("⚠️ 读取宠物窗口配置失败: %v", configErr)
-		} else if windowConfig.Enabled {
-			services.WriteRuntimeDiagnostic("pet-window-enabled", "enabled=true")
-			// 与稳定主线保持一致：等 Wails 应用进入 Started 状态后直接打开桌宠。
-			// 不把桌宠绑定到主窗口导航完成事件，避免两个 WebView 的生命周期互相等待。
-			app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(_ *application.ApplicationEvent) {
-				if err := petWindow.Open(); err != nil {
-					log.Printf("⚠️ 打开宠物窗口失败: %v", err)
-				}
-			})
+	var petWindow *services.PetWindow
+	var petWindowErr error
+	var petWindowProxy *petWindowLinkProxy
+	if !petProcess.Enabled() {
+		petWindow, petWindowErr = services.NewPetWindow(app, services.PetWindowOptions{
+			Name:  services.DefaultPetWindowName,
+			Title: services.DefaultPetWindowTitle,
+			// 与 OpenCowork 的 appView=pet 入口保持一致；独立窗口必须绕过主应用
+			// App.vue，否则会把 Sidebar 和普通路由布局一起渲染进透明桌宠窗。
+			URL:    "/?appView=pet",
+			Width:  services.DefaultPetWindowWidth,
+			Height: services.DefaultPetWindowHeight,
+		})
+		if petWindowErr != nil {
+			services.WriteRuntimeDiagnostic("pet-window-create-failed", fmt.Sprintf("err=%q", petWindowErr.Error()))
+			log.Printf("⚠️ 宠物窗口初始化失败: %v", petWindowErr)
 		} else {
-			services.WriteRuntimeDiagnostic("pet-window-enabled", "enabled=false")
+			// 桌宠不再永久置顶；打开后由平台运行时根据当前站立窗口同步 Z 序。
+			windowConfig, configErr := petService.GetWindowConfig()
+			if configErr != nil {
+				services.WriteRuntimeDiagnostic("pet-window-config-read-failed", fmt.Sprintf("err=%q", configErr.Error()))
+				log.Printf("⚠️ 读取宠物窗口配置失败: %v", configErr)
+			} else if windowConfig.Enabled {
+				services.WriteRuntimeDiagnostic("pet-window-enabled", "enabled=true")
+				// 与稳定主线保持一致：等 Wails 应用进入 Started 状态后直接打开桌宠。
+				// 不把桌宠绑定到主窗口导航完成事件，避免两个 WebView 的生命周期互相等待。
+				app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(_ *application.ApplicationEvent) {
+					if err := petWindow.Open(); err != nil {
+						log.Printf("⚠️ 打开宠物窗口失败: %v", err)
+					}
+				})
+			} else {
+				services.WriteRuntimeDiagnostic("pet-window-enabled", "enabled=false")
+			}
 		}
+	} else {
+		// 外置模式由子进程自己的 Wails 窗口承载，主进程只在 Started 后启动并
+		// 完成 link.attach；这样主窗口创建和桌宠窗口创建互不阻塞。
+		petWindowProxy = newPetWindowLinkProxy(petProcess)
+		app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(_ *application.ApplicationEvent) {
+			go func() {
+				if err := petProcess.Start(context.Background()); err != nil {
+					services.WriteRuntimeDiagnostic("pet-process-start-failed", fmt.Sprintf("err=%q", err.Error()))
+					log.Printf("⚠️ 独立宠物进程启动失败: %v", err)
+					return
+				}
+				petWindowProxy.refreshState()
+				services.WriteRuntimeDiagnostic("pet-process-linked", "linked=true")
+				log.Println("✅ 独立宠物进程已联动")
+			}()
+		})
 	}
 	// PetWindow 依赖已经创建好的原生窗口，故在 app 创建后再注册；服务仍在
 	// Wails 启动前完成绑定，前端不会看到“设置已保存但窗口方法不存在”的假状态。
-	petWindowAPI := services.NewPetWindowAPI(petWindow)
+	var petWindowAPI *services.PetWindowAPI
+	if petProcess.Enabled() {
+		if petWindowProxy == nil {
+			petWindowProxy = newPetWindowLinkProxy(petProcess)
+		}
+		petWindowAPI = services.NewPetWindowAPIWithProxy(petWindowProxy)
+	} else {
+		petWindowAPI = services.NewPetWindowAPI(petWindow)
+	}
 	app.RegisterService(application.NewService(petWindowAPI))
 
 	// 浏览器预览没有 Wails 原生消息桥；loopback bridge 让设置页能够复用同一套
@@ -902,6 +938,11 @@ func main() {
 			if petBrowserBridge != nil {
 				_ = runShutdownStage("pet-browser-bridge", func(ctx context.Context) error {
 					return petBrowserBridge.Stop(ctx)
+				})
+			}
+			if petProcess != nil && petProcess.Enabled() {
+				_ = runShutdownStage("pet-process", func(ctx context.Context) error {
+					return petProcess.Stop(ctx)
 				})
 			}
 			if petWindow != nil {

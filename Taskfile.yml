@@ -20,6 +20,22 @@ tasks:
         vars:
           PRODUCTION: "true"
 
+  build-pet:
+    summary: Builds the standalone pet executable for production
+    cmds:
+      # 宠物生产构建复用独立入口，确保前端资源、宠物资源和进程退出处理保持一致。
+      - task: common:pet:build
+        vars:
+          PRODUCTION: "true"
+      # 不同平台的 shell 输出语法不同，分别打印规范化后的最终目录，避免用户再猜产物位置。
+      - cmd: >-
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command
+          '& { Write-Host ("Pet build directory: " + [System.IO.Path]::GetFullPath("{{.ROOT_DIR}}/bin/pet")) }'
+        platforms: [windows]
+      - cmd: >-
+          printf 'Pet build directory: %s\n' '{{.ROOT_DIR}}/bin/pet'
+        platforms: [linux, darwin]
+
   publish:
     summary: Builds the current platform and pushes the release tag
     preconditions:

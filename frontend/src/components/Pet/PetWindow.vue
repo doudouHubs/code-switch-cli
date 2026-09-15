@@ -31,7 +31,6 @@ import {
   normalizePetRuntimeState,
   petApi,
   PET_WINDOW_RUNTIME_METHODS,
-  settlePetRuntimeState,
   type PetRuntimeMode,
   type PetWindowPlatformSnapshot
 } from './petApi'
@@ -107,6 +106,7 @@ const WALK_SPEED = 55
 const SWIM_SPEED = 38
 const DASH_SPEED = 170
 const PET_POINTER_DRAG_THRESHOLD = 6
+const PET_FACING_DEAD_ZONE = 4
 const PET_CONTEXT_MENU_WIDTH = 236
 const PET_CHAT_WIDTH = 292
 const PET_REPORT_TIME_BUBBLE_MS = 5_200
@@ -131,6 +131,7 @@ const PET_BEHAVIOR_DISPLAY_HEIGHTS: Record<string, number> = {
   swim: 80,
   zen: 112,
   play: 110,
+  work: 100,
   drag: 126,
   beg: 118,
   'report-time': 100
@@ -228,6 +229,19 @@ interface PetActivityRequestState {
   terminal: boolean
 }
 
+interface PetTypingState {
+  active: boolean
+  lastKeyAt: number
+  expiresAt: number
+}
+
+interface PetPointerLocation {
+  screenX: number
+  windowX: number
+  windowWidth: number
+  viewportWidth: number
+}
+
 interface PetDreamResult {
   dream: string
   title: string
@@ -291,10 +305,14 @@ const PET_WINDOW_PLATFORMS_METHOD = `${PET_WINDOW_SERVICE}.${PET_WINDOW_RUNTIME_
 const PET_WINDOW_POINTER_EVENT = 'pet.window.pointer'
 const PET_WINDOW_PLATFORMS_EVENT = 'pet.window.platforms.changed'
 const PET_ACTIVITY_EVENT = 'pet.activity'
+const PET_TYPING_SERVICE = 'codeswitch/services.PetTypingAPI'
+const PET_TYPING_STATE_METHOD = `${PET_TYPING_SERVICE}.State`
+const PET_TYPING_EVENT = 'pet.typing'
 const PET_PLATFORM_REFRESH_DEBOUNCE_MS = 100
 const PET_IDLE_DOZE_THRESHOLD_SECONDS = 300
 const PET_IDLE_WAKE_THRESHOLD_SECONDS = 5
 const PET_IDLE_CHECK_INTERVAL_MS = 5_000
+// backend 的状态推进由 Go 心跳广播；只有浏览器 fallback 需要本地预览结算。
 const PET_RUNTIME_TICK_INTERVAL_MS = 30_000
 const PET_SETTINGS_UPDATED_EVENT = 'pet.settings.updated'
 
@@ -380,13 +398,16 @@ const petImagePreviewCloseRef = ref<HTMLButtonElement | null>(null)
 const atlasImageFailed = ref(false)
 // dozing 是系统空闲造成的前端表现，不写入 PetSnapshot.sleeping，避免误触发梦境和持久化睡眠规则。
 const dozing = ref(false)
+// typingActive 是独立宠物进程的瞬时输入状态，只影响视觉和环境调度，不落盘。
+const typingActive = ref(false)
 const dreamPaused = ref(false)
 // 工作态以请求为单位计数；同一时间多个请求并发时，任一请求仍有真实输出，
 // 宠物都不能回到环境行为。使用 shallowRef 替换 Set，避免每个事件建立深层代理。
 const activePetActivityRequestIds = shallowRef<Set<string>>(new Set())
 
 let clockTimer: number | undefined
-let runtimeTickTimer: number | undefined
+let fallbackRuntimeTickTimer: number | undefined
+let fallbackRuntimeTickInFlight = false
 let proactiveTimer: number | undefined
 let ambientTimer: number | undefined
 let idleTimer: number | undefined
@@ -423,6 +444,7 @@ let petDropSettlementPending = false
 let menuCloseTimer: number | undefined
 let squashTimer: number | undefined
 let petPointerGesture: PetPointerGesture | null = null
+let lastPetPointerLocation: PetPointerLocation | null = null
 let windowModeBridgeUnavailable = false
 let requestedWindowMode: PetWindowMode = 'passive'
 let appliedWindowMode: PetWindowMode = 'passive'
@@ -440,6 +462,7 @@ let forcePlatformLayerSync = false
 let petWindowUnmounted = false
 let idleCheckInFlight = false
 let idleBridgeUnavailable = false
+let typingBridgeUnavailable = false
 let stopPetActionEvent: (() => void) | null = null
 let stopPetRuntimeEvent: (() => void) | null = null
 let stopPetReminderEvent: (() => void) | null = null
@@ -448,6 +471,7 @@ let stopPetPointerEvent: (() => void) | null = null
 let stopPetSettingsEvent: (() => void) | null = null
 let stopPetPlatformsEvent: (() => void) | null = null
 let stopPetActivityEvent: (() => void) | null = null
+let stopPetTypingEvent: (() => void) | null = null
 const petActivityRequestStates = new Map<string, PetActivityRequestState>()
 
 const state = computed(() => snapshot.value?.state ?? null)
@@ -475,9 +499,10 @@ const atlasBehavior = computed(() => {
   if (action === 'bathe') return 'bathe'
   if (action === 'soak') return 'soak'
   if (action === 'play') return 'play'
-  // 只有真实 Token 才会进入工作态；连接等待、usage 和空事件不会改变动作。
-  // zen 是现有 atlas 的稳定动作，避免为工作态额外扩展皮肤资源契约。
+  // 只有真实 Token 才会进入 AI 工作态；连接等待、usage 和空事件不会改变动作。
   if (activePetActivityRequestIds.value.size > 0) return 'zen'
+  // AI 活动和显式用户动作优先于键盘工作态；键盘只接管普通环境行为。
+  if (typingActive.value) return 'work'
   if (ambientBehavior.value === 'eat' || ambientBehavior.value === 'munch') return 'feed'
   if (ambientBehavior.value) return ambientBehavior.value
   return 'idle'
@@ -531,6 +556,48 @@ function setRenderedPetPosition(x: number, lift: number): void {
   renderedPetX = x
   renderedPetLift = lift
   applyPetAnchorTransform()
+}
+
+function getPetPointerLocalX(location: PetPointerLocation): number | null {
+  if (
+    !Number.isFinite(location.screenX) ||
+    !Number.isFinite(location.windowX) ||
+    !Number.isFinite(location.windowWidth) ||
+    location.windowWidth <= 0 ||
+    !Number.isFinite(location.viewportWidth) ||
+    location.viewportWidth <= 0
+  ) {
+    return null
+  }
+  const localX = ((location.screenX - location.windowX) / location.windowWidth) * location.viewportWidth
+  return Number.isFinite(localX) ? localX : null
+}
+
+function isPetFacingPointerFrozen(): boolean {
+  // 前进、拖拽和落地结算各自拥有明确的方向语义；鼠标事件只能更新缓存，
+  // 不能在这些过程里反向改写行进方向或造成视觉抖动。
+  return (
+    dragging.value ||
+    petDropSettlementActive ||
+    petDropSettlementPending ||
+    liftFrame !== undefined ||
+    roamFrame !== undefined
+  )
+}
+
+function updatePetFacingFromPointer(location: PetPointerLocation): void {
+  const localX = getPetPointerLocalX(location)
+  if (localX === null || isPetFacingPointerFrozen()) return
+
+  const petCenterX = renderedPetX + petMetrics.value.width / 2
+  const delta = localX - petCenterX
+  // 鼠标在宠物中心附近时保持原方向，避免采样误差和高 DPI 换算造成左右抖动。
+  if (Math.abs(delta) <= PET_FACING_DEAD_ZONE) return
+  petFacingLeft.value = delta < 0
+}
+
+function updatePetFacingFromLastPointer(): void {
+  if (lastPetPointerLocation) updatePetFacingFromPointer(lastPetPointerLocation)
 }
 
 function commitPetPosition(): void {
@@ -860,7 +927,10 @@ async function settlePetDrop(): Promise<void> {
     applyPetPlatformSnapshot(normalizePetPlatformSnapshot(null))
   } finally {
     petDropSettlementActive = false
-    if (!petWindowUnmounted && !petDropSettlementPending) scheduleNextAmbientBehavior()
+    if (!petWindowUnmounted && !petDropSettlementPending) {
+      updatePetFacingFromLastPointer()
+      scheduleNextAmbientBehavior()
+    }
   }
 }
 
@@ -871,6 +941,7 @@ function animatePetDrop(targetLift = 0): void {
   if (Math.abs(startedLift - targetLift) < 0.25) {
     setRenderedPetPosition(renderedPetX, targetLift)
     commitPetPosition()
+    updatePetFacingFromLastPointer()
     return
   }
   const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
@@ -893,6 +964,8 @@ function animatePetDrop(targetLift = 0): void {
       setRenderedPetPosition(renderedPetX, targetLift)
       commitPetPosition()
       liftFrame = undefined
+      // 只有落地动画真正结束后才重新接管鼠标朝向，避免弹跳过程中左右翻转。
+      updatePetFacingFromLastPointer()
       return
     }
     liftFrame = window.requestAnimationFrame(tick)
@@ -1170,11 +1243,6 @@ function handleNativePetPointer(value: unknown): void {
   const source = Array.isArray(value) && value.length === 1 ? value[0] : value
   if (petWindowUnmounted || !isRecord(source)) return
   const inside = source.inside === true
-  if (!inside) {
-    syncPetHoverState(null)
-    if (!dragging.value) requestPetWindowMode(getWindowModeAfterPointerExit())
-    return
-  }
   const screenX = typeof source.screenX === 'number' ? source.screenX : NaN
   const screenY = typeof source.screenY === 'number' ? source.screenY : NaN
   const windowX = typeof source.windowX === 'number' ? source.windowX : NaN
@@ -1196,9 +1264,29 @@ function handleNativePetPointer(value: unknown): void {
     if (!dragging.value) requestPetWindowMode(getWindowModeAfterPointerExit())
     return
   }
+  const pointerLocation: PetPointerLocation = {
+    screenX,
+    windowX,
+    windowWidth,
+    viewportWidth
+  }
+  // 不论鼠标是否落在透明桌宠窗口内，都记录屏幕坐标；窗口外的鼠标移动
+  // 仍然决定原地宠物的朝向，且不会改变已有的穿透/悬停判定。
+  lastPetPointerLocation = pointerLocation
+  updatePetFacingFromPointer(pointerLocation)
   // Native GetWindowRect 使用物理像素，WebView 的 DOM 使用 CSS/DIP；按窗口比例换算，
   // 才能在高 DPI 和负坐标副屏上保持 elementFromPoint 的命中位置一致。
-  const localX = ((screenX - windowX) / windowWidth) * viewportWidth
+  const localX = getPetPointerLocalX(pointerLocation)
+  if (localX === null) {
+    syncPetHoverState(null)
+    if (!dragging.value) requestPetWindowMode(getWindowModeAfterPointerExit())
+    return
+  }
+  if (!inside) {
+    syncPetHoverState(null)
+    if (!dragging.value) requestPetWindowMode(getWindowModeAfterPointerExit())
+    return
+  }
   const localY = ((screenY - windowY) / windowHeight) * viewportHeight
   const hovered = document.elementFromPoint(localX, localY)
   syncPetHoverState(hovered)
@@ -1248,6 +1336,53 @@ function isPetChatActive(): boolean {
   const chat = document.querySelector<HTMLElement>('.pet-chat')
   // PetChat 是现有组件边界，不能新增共享 open 状态；焦点或悬停足以表示用户正在操作聊天面板。
   return Boolean(chat && (chat.matches(':hover') || chat.contains(document.activeElement)))
+}
+
+function setPetTypingActive(active: boolean): void {
+  if (typingActive.value === active) return
+  typingActive.value = active
+  if (active) {
+    // 键盘输入一开始就撤销环境漫游和延迟任务；显式拖拽、睡眠、照料动作
+    // 不在这里清除，atlasBehavior 会按更高优先级继续展示它们。
+    stopAmbientBehavior()
+    if (petBubble.value?.source === 'ambient') clearPetBubble('ambient')
+    if (dozing.value) dozing.value = false
+    return
+  }
+
+  // 停键后只恢复调度入口，不强行覆盖当前 AI、用户动作或真实睡眠状态；
+  // scheduleNextAmbientBehavior 会再次检查这些互斥条件。
+  if (!state.value?.sleeping && !state.value?.awayTask) scheduleNextAmbientBehavior()
+}
+
+function normalizePetTypingState(value: unknown): PetTypingState | null {
+  const source = decodePetTypingPayload(value)
+  const nested = decodePetTypingPayload(source.data)
+  const active = source.active ?? nested.active
+  if (typeof active !== 'boolean') return null
+  const lastKeyAt = source.lastKeyAt ?? nested.lastKeyAt
+  const expiresAt = source.expiresAt ?? nested.expiresAt
+  return {
+    active,
+    lastKeyAt: typeof lastKeyAt === 'number' && Number.isFinite(lastKeyAt) ? lastKeyAt : 0,
+    expiresAt: typeof expiresAt === 'number' && Number.isFinite(expiresAt) ? expiresAt : 0
+  }
+}
+
+async function refreshPetTypingState(): Promise<void> {
+  if (typingBridgeUnavailable || petWindowUnmounted || phase.value !== 'ready') return
+  try {
+    const state = normalizePetTypingState(await callPetBridge<unknown>(PET_TYPING_STATE_METHOD))
+    if (state) setPetTypingActive(state.active)
+  } catch (error) {
+    if (isMissingPetBindingError(error)) {
+      // 主程序内嵌旧窗口或浏览器 fallback 没有独立键盘服务；熔断后保持
+      // 普通行为，不能在每次 hydration 时重复刷不存在的方法。
+      typingBridgeUnavailable = true
+      return
+    }
+    console.warn('[Pet] typing state query failed:', error)
+  }
 }
 
 function wakePetFromDozing(): void {
@@ -1446,6 +1581,7 @@ function stopPetRoaming(): void {
   // 停止可能由点击、菜单、聊天或业务动作触发；先提交当前 DOM 位置，避免
   // 后续菜单定位仍拿着上一次动画起点，导致面板突然跳回旧位置。
   commitPetPosition()
+  updatePetFacingFromLastPointer()
 }
 
 function startPetPlatformFall(
@@ -1526,6 +1662,7 @@ function startPetPlatformFall(
       commitPetPosition()
       roamFrame = undefined
       if (ambientBehavior.value === behavior) ambientBehavior.value = null
+      updatePetFacingFromLastPointer()
       scheduleNextAmbientBehavior()
       return
     }
@@ -1537,7 +1674,7 @@ function startPetPlatformFall(
 }
 
 function startPetRoaming(behavior: 'walk' | 'swim', speed = behavior === 'swim' ? SWIM_SPEED : WALK_SPEED): number {
-  if (dozing.value || contextMenuOpen.value || chatOpen.value || dragging.value || petDropSettlementActive || petDropSettlementPending || state.value?.awayTask) return 0
+  if (typingActive.value || dozing.value || contextMenuOpen.value || chatOpen.value || dragging.value || petDropSettlementActive || petDropSettlementPending || state.value?.awayTask) return 0
   const currentPlatform = getCurrentPetPlatform()
   const platformBounds = currentPlatform
     ? getPetPlatformBounds(
@@ -1609,6 +1746,7 @@ function startPetRoaming(behavior: 'walk' | 'swim', speed = behavior === 'swim' 
             setPetPlatformSupport(currentPlatform)
             commitPetPosition()
             if (ambientBehavior.value === behavior) ambientBehavior.value = null
+            updatePetFacingFromLastPointer()
             if (ambientBehaviorTimer !== undefined) window.clearTimeout(ambientBehaviorTimer)
             ambientBehaviorTimer = undefined
             scheduleNextAmbientBehavior()
@@ -1619,6 +1757,7 @@ function startPetRoaming(behavior: 'walk' | 'swim', speed = behavior === 'swim' 
       }
       commitPetPosition()
       if (ambientBehavior.value === behavior) ambientBehavior.value = null
+      updatePetFacingFromLastPointer()
       if (ambientBehaviorTimer !== undefined) window.clearTimeout(ambientBehaviorTimer)
       ambientBehaviorTimer = undefined
       scheduleNextAmbientBehavior()
@@ -1632,7 +1771,7 @@ function startPetRoaming(behavior: 'walk' | 'swim', speed = behavior === 'swim' 
 }
 
 function setAmbientBehavior(behavior: PetAmbientBehavior, duration: number, speed?: number): void {
-  if (dozing.value) return
+  if (typingActive.value || dozing.value) return
   ambientToken += 1
   const token = ambientToken
   if (ambientBehaviorTimer !== undefined) window.clearTimeout(ambientBehaviorTimer)
@@ -1661,6 +1800,7 @@ function canRunAmbientBehavior(): boolean {
       phase.value === 'ready' &&
       !current.sleeping &&
       !current.awayTask &&
+      !typingActive.value &&
       !dozing.value &&
       !actionBusy.value &&
       !transientAction.value &&
@@ -1734,7 +1874,7 @@ function runAmbientBehavior(): void {
 
 function scheduleNextAmbientBehavior(): void {
   if (petWindowUnmounted || petDropSettlementActive || petDropSettlementPending) return
-  if (activePetActivityRequestIds.value.size > 0) return
+  if (typingActive.value || activePetActivityRequestIds.value.size > 0) return
   if (ambientTimer !== undefined) window.clearTimeout(ambientTimer)
   if (ambientBehavior.value) return
   // OpenCowork 在宠物回到 idle 后用 2.5~6.5 秒随机延迟排下一次行为，
@@ -2385,6 +2525,7 @@ function canRunProactiveRemark(timed: boolean): boolean {
     phase.value !== 'ready' ||
     current.state.sleeping ||
     current.state.awayTask ||
+    typingActive.value ||
     dozing.value ||
     contextMenuOpen.value ||
     dragging.value
@@ -2778,6 +2919,19 @@ function decodePetActivityPayload(value: unknown): Record<string, unknown> {
   }
 }
 
+function decodePetTypingPayload(value: unknown): Record<string, unknown> {
+  const unwrapped = Array.isArray(value) && value.length === 1 ? value[0] : value
+  if (isRecord(unwrapped)) return unwrapped
+  if (typeof unwrapped !== 'string' || !unwrapped.trim()) return {}
+  try {
+    const parsed: unknown = JSON.parse(unwrapped)
+    const parsedValue = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed
+    return isRecord(parsedValue) ? parsedValue : {}
+  } catch {
+    return {}
+  }
+}
+
 function normalizePetActivityEvent(value: unknown): PetActivityEvent | null {
   const source = decodePetActivityPayload(value)
   const nested = decodePetActivityPayload(source.data)
@@ -2848,6 +3002,12 @@ function handlePetActivityEvent(value: unknown): void {
 
   setPetActivityRequestActive(event.requestId, false)
   if (activePetActivityRequestIds.value.size === 0) scheduleNextAmbientBehavior()
+}
+
+function handlePetTypingEvent(value: unknown): void {
+  const state = normalizePetTypingState(value)
+  if (!state) return
+  setPetTypingActive(state.active)
 }
 
 function matchesPetEvent(payload: Record<string, unknown>): boolean {
@@ -3154,7 +3314,7 @@ async function loadSnapshot(showLoading = false): Promise<void> {
     if (readyPresentationPetId !== requestedPetId) {
       readyPresentationPetId = requestedPetId
       // hydration 完成后先给一次问候，后续动作、梦话和聊天再覆盖同一个气泡 owner。
-      showPetBubble(t('pet.window.ambient.welcome'), 'muted', 'ambient', 4_500)
+      if (!typingActive.value) showPetBubble(t('pet.window.ambient.welcome'), 'muted', 'ambient', 4_500)
     }
     if (lifecycleInitializedPetId !== requestedPetId && snapshot.value) {
       void settlePetLifecycleFeedback(snapshot.value, generation)
@@ -3173,21 +3333,36 @@ async function loadSnapshot(showLoading = false): Promise<void> {
   }
 }
 
-function tickLocalRuntimeState(): void {
-  if (phase.value !== 'ready' || !snapshot.value) return
-  const current = snapshot.value.state
-  const next = settlePetRuntimeState(current, Date.now())
+async function tickFallbackRuntimeState(): Promise<void> {
   if (
-    next.lastTickAt === current.lastTickAt &&
-    next.hunger === current.hunger &&
-    next.cleanliness === current.cleanliness &&
-    next.mood === current.mood &&
-    next.sleeping === current.sleeping &&
-    next.sleepEndsAt === current.sleepEndsAt
+    phase.value !== 'ready' ||
+    !snapshot.value ||
+    runtimeMode.value !== 'fallback' ||
+    fallbackRuntimeTickInFlight
   ) {
     return
   }
-  snapshot.value = { ...snapshot.value, state: next }
+
+  fallbackRuntimeTickInFlight = true
+  const generation = snapshotGeneration
+  try {
+    // fallback 的结算必须经过 petApi，让 fallbackSnapshots 同步更新；只改
+    // snapshot.value 会导致下一次动作又从旧属性开始，重现离线喂食回滚。
+    const runtime = await petApi.getRuntimeSnapshot(props.petId)
+    if (
+      petWindowUnmounted ||
+      generation !== snapshotGeneration ||
+      phase.value !== 'ready' ||
+      runtimeMode.value !== 'fallback'
+    ) {
+      return
+    }
+    mergeRuntimeSnapshot(runtime)
+  } catch (error) {
+    if (!petWindowUnmounted) console.warn('[Pet] fallback runtime settlement failed:', error)
+  } finally {
+    fallbackRuntimeTickInFlight = false
+  }
 }
 
 async function loadBundledAtlas(): Promise<void> {
@@ -3362,6 +3537,9 @@ onMounted(async () => {
   stopPetActivityEvent = Events.On(PET_ACTIVITY_EVENT, (event) => {
     handlePetActivityEvent(event.data)
   })
+  stopPetTypingEvent = Events.On(PET_TYPING_EVENT, (event) => {
+    handlePetTypingEvent(event.data)
+  })
   stopPetSettingsEvent = Events.On(PET_SETTINGS_UPDATED_EVENT, (event) => {
     void handlePetSettingsUpdated(event.data)
   })
@@ -3373,6 +3551,7 @@ onMounted(async () => {
   stopPetPointerEvent = Events.On(PET_WINDOW_POINTER_EVENT, (event) => handleNativePetPointer(event.data))
   stopPetPlatformsEvent = Events.On(PET_WINDOW_PLATFORMS_EVENT, () => schedulePetPlatformRefresh())
   await Promise.all([loadSnapshot(true), loadBundledAtlas()])
+  await refreshPetTypingState()
   void refreshPetPlatforms()
   clockTimer = window.setInterval(() => {
     now.value = Date.now()
@@ -3383,7 +3562,9 @@ onMounted(async () => {
     void pollPetWindowIdle()
   }, PET_IDLE_CHECK_INTERVAL_MS)
   void pollPetWindowIdle()
-  runtimeTickTimer = window.setInterval(tickLocalRuntimeState, PET_RUNTIME_TICK_INTERVAL_MS)
+  fallbackRuntimeTickTimer = window.setInterval(() => {
+    void tickFallbackRuntimeState()
+  }, PET_RUNTIME_TICK_INTERVAL_MS)
   scheduleNextAmbientBehavior()
   schedulePetTimeReport()
   proactiveTimer = window.setInterval(() => {
@@ -3400,7 +3581,7 @@ onBeforeUnmount(() => {
   textCompositionActive = false
   snapshotGeneration += 1
   refreshRequested = false
-  if (runtimeTickTimer !== undefined) window.clearInterval(runtimeTickTimer)
+  if (fallbackRuntimeTickTimer !== undefined) window.clearInterval(fallbackRuntimeTickTimer)
   if (clockTimer !== undefined) window.clearInterval(clockTimer)
   if (ambientTimer !== undefined) window.clearTimeout(ambientTimer)
   if (idleTimer !== undefined) window.clearInterval(idleTimer)
@@ -3423,6 +3604,7 @@ onBeforeUnmount(() => {
   stopPetActionEvent?.()
   stopPetRuntimeEvent?.()
   stopPetActivityEvent?.()
+  stopPetTypingEvent?.()
   stopPetReminderEvent?.()
   stopPetAudioEvent?.()
   stopPetPointerEvent?.()
@@ -3431,6 +3613,7 @@ onBeforeUnmount(() => {
   stopPetActionEvent = null
   stopPetRuntimeEvent = null
   stopPetActivityEvent = null
+  stopPetTypingEvent = null
   stopPetReminderEvent = null
   stopPetAudioEvent = null
   stopPetPointerEvent = null
@@ -3439,6 +3622,8 @@ onBeforeUnmount(() => {
   stopProactiveSession()
   stopDreamSession()
   activePetActivityRequestIds.value = new Set()
+  typingActive.value = false
+  lastPetPointerLocation = null
   petActivityRequestStates.clear()
   petAudioPlayer.dispose()
 })

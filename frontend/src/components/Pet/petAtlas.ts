@@ -10,6 +10,7 @@ export const PET_POSE_KEYS = [
   'swim',
   'zen',
   'play',
+  'work',
   'held',
   'report-time'
 ] as const
@@ -27,6 +28,7 @@ export const PET_BEHAVIOR_KEYS = [
   'swim',
   'zen',
   'play',
+  'work',
   'drag',
   'beg',
   'report-time'
@@ -115,10 +117,26 @@ export const DEFAULT_PET_ATLAS_BEHAVIORS: Record<PetBehaviorKey, PetAtlasBehavio
   swim: { actions: ['swim'] },
   zen: { actions: ['zen'] },
   play: { actions: ['play'] },
+  work: { actions: ['work'] },
   drag: { actions: ['held'] },
   beg: { actions: ['beg'] },
   'report-time': { actions: ['report-time'] }
 }
+
+// 自定义皮肤早于 work 行为契约存在；这些提示词只用于把已有动作绑定到
+// 工作态，不参与业务判断，也不会把动作名称写回 manifest。
+const PET_WORK_ACTION_HINTS = [
+  'work',
+  'typing',
+  'type',
+  'keyboard',
+  'computer',
+  'office',
+  '办公',
+  '打字',
+  '键盘',
+  '电脑'
+] as const
 
 export function isValidPetActionId(actionId: string): boolean {
   return (
@@ -184,6 +202,23 @@ export function getPetAtlasBehaviorActions(
   const configured = behavior?.actions ?? getDefaultPetAtlasBehaviors().idle.actions
   const available = configured.filter((actionId) => Boolean(manifest.animations[actionId]))
   if (available.length > 0) return [...available]
+
+  if (behaviorId === 'work') {
+    const inferred = getPetAtlasActionKeys(manifest.animations).filter((actionId) => {
+      const animation = manifest.animations[actionId]
+      if (!animation) return false
+      const searchable = [actionId, animation.label ?? '', animation.description ?? '']
+        .join(' ')
+        .toLocaleLowerCase()
+      return PET_WORK_ACTION_HINTS.some((hint) => searchable.includes(hint.toLocaleLowerCase()))
+    })
+    if (inferred.length > 0) return inferred
+
+    // 旧皮肤没有工作动作时保持升级前的普通显示；idle 是 parser 强制存在的
+    // 稳定动作，不能把不存在的 work 行交给 Canvas 造成空帧或尺寸抖动。
+    return getPetAtlasBehaviorActions(manifest, 'idle')
+  }
+
   const firstAvailable = getPetAtlasActionKeys(manifest.animations)[0]
   return firstAvailable ? [firstAvailable] : []
 }

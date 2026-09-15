@@ -234,7 +234,9 @@ func (r *PetRuntime) runOnceLocked(nowMs int64) (PetRuntimeResult, error) {
 		return result, nil
 	}
 
-	config, err := r.service.GetCareConfig()
+	// 运行时支持注入 Clock；同一轮后续读取也必须使用相同时间点，不能因为
+	// GetCareConfig 默认读取真实时钟而把刚刚结算过的状态再推进一遍。
+	config, err := r.service.getCareConfigAt(nowMs)
 	if err != nil {
 		r.setRuntimeError(&result, err)
 		return result, err
@@ -281,7 +283,7 @@ func (r *PetRuntime) runOnceLocked(nowMs int64) (PetRuntimeResult, error) {
 	r.lastAttemptAt = nowMs
 	r.hasLastAttempt = true
 	for _, action := range actions {
-		actionResult, actionErr := r.executeAction(action)
+		actionResult, actionErr := r.executeAction(action, nowMs)
 		attempt := PetRuntimeAction{
 			Action: action,
 			OK:     actionResult.OK,
@@ -314,23 +316,31 @@ func (r *PetRuntime) runOnceLocked(nowMs int64) (PetRuntimeResult, error) {
 	return result, nil
 }
 
-func (r *PetRuntime) executeAction(action PetAction) (PetActionResult, error) {
+func (r *PetRuntime) executeAction(action PetAction, nowMs int64) (PetActionResult, error) {
 	switch action {
 	case PetActionFeed:
-		return r.service.Feed()
+		return r.service.runActionAt(nowMs, func(state PetState, _ PetMigrationSnapshot, _ int64) (PetState, PetActionResult) {
+			return PetFeed(state)
+		})
 	case PetActionBathe:
-		return r.service.Bathe()
+		return r.service.runActionAt(nowMs, func(state PetState, _ PetMigrationSnapshot, _ int64) (PetState, PetActionResult) {
+			return PetBathe(state)
+		})
 	case PetActionSoak:
-		return r.service.Soak()
+		return r.service.runActionAt(nowMs, func(state PetState, snapshot PetMigrationSnapshot, _ int64) (PetState, PetActionResult) {
+			return PetSoak(state, snapshot.Experience.TotalExp)
+		})
 	case PetActionPlay:
-		return r.service.Play()
+		return r.service.runActionAt(nowMs, func(state PetState, _ PetMigrationSnapshot, _ int64) (PetState, PetActionResult) {
+			return PetPlay(state)
+		})
 	default:
 		return PetActionResult{}, fmt.Errorf("自动照料不支持动作 %q", action)
 	}
 }
 
 func (r *PetRuntime) refreshSnapshot(result *PetRuntimeResult) error {
-	state, err := r.service.GetState()
+	state, err := r.service.getStateAt(result.At)
 	if err != nil {
 		return err
 	}

@@ -88,6 +88,10 @@ Section
     
     !insertmacro wails.files
 
+    # 主程序和独立桌宠必须放在同一目录，主程序才能按默认路径发现并联动
+    # CodeSwitchPet.exe；宠物自身已经嵌入前端和 resources/pets，不需要额外目录。
+    File /oname=CodeSwitchPet.exe "..\..\..\bin\pet\CodeSwitchPet.exe"
+
     CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
     CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
 

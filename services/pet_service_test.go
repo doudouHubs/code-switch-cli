@@ -40,6 +40,26 @@ func (r *memoryPetRepository) LoadSnapshot(_ context.Context, petID string) (Pet
 	return clonePetSnapshotForTest(r.snapshot), nil
 }
 
+func (r *memoryPetRepository) LoadSettingsSnapshot(_ context.Context, petID string) (PetMigrationSnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.loadErr != nil {
+		return PetMigrationSnapshot{}, r.loadErr
+	}
+	var snapshot PetMigrationSnapshot
+	if r.snapshots != nil {
+		snapshot = clonePetSnapshotForTest(r.snapshots[petID])
+	} else {
+		snapshot = clonePetSnapshotForTest(r.snapshot)
+	}
+	// 模拟 DAO 的轻量读取：保留设置页首屏字段，不把历史集合带入服务层。
+	snapshot.ExpLog = nil
+	snapshot.PlanRecords = nil
+	snapshot.Dreams = nil
+	snapshot.Memories = nil
+	return snapshot, nil
+}
+
 func (r *memoryPetRepository) SaveSnapshot(_ context.Context, snapshot PetMigrationSnapshot) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -50,6 +70,26 @@ func (r *memoryPetRepository) SaveSnapshot(_ context.Context, snapshot PetMigrat
 		r.snapshots[snapshot.PetID] = clonePetSnapshotForTest(snapshot)
 	} else {
 		r.snapshot = clonePetSnapshotForTest(snapshot)
+	}
+	r.saveCount++
+	return nil
+}
+
+func (r *memoryPetRepository) SaveState(_ context.Context, state PetState) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.saveErr != nil {
+		return r.saveErr
+	}
+	if r.snapshots != nil {
+		snapshot := clonePetSnapshotForTest(r.snapshots[state.PetID])
+		snapshot.PetID = state.PetID
+		snapshot.State = &state
+		r.snapshots[state.PetID] = clonePetSnapshotForTest(snapshot)
+	} else {
+		r.snapshot.PetID = state.PetID
+		r.snapshot.State = &state
+		r.snapshot = clonePetSnapshotForTest(r.snapshot)
 	}
 	r.saveCount++
 	return nil
@@ -545,8 +585,11 @@ func TestPetServiceResolveAwayTaskIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate ResolveAwayTask() error = %v", err)
 	}
-	if reward != nil || repository.saveCount != saves {
-		t.Fatalf("duplicate away resolution reward=%#v saveCount=%d want=%d", reward, repository.saveCount, saves)
+	if reward != nil || repository.saveCount != saves+1 {
+		t.Fatalf("duplicate away resolution reward=%#v saveCount=%d want state settlement count %d", reward, repository.saveCount, saves+1)
+	}
+	if snapshot := repository.getSnapshot(); snapshot.State == nil || snapshot.State.LastTickAt != state.AwayTask.EndsAt+time.Hour.Milliseconds() {
+		t.Fatalf("duplicate away resolution state = %#v, want the later read to settle time", snapshot.State)
 	}
 }
 
@@ -588,6 +631,103 @@ func TestPetServiceNormalizesTimeAndConfigs(t *testing.T) {
 	}
 	if snapshot.DreamConfig.SleepTalkMinLength != PetDreamMaxSleepTalkLength || snapshot.DreamConfig.BubbleMinDurationSeconds != PetDreamMinBubbleDurationSeconds {
 		t.Fatalf("normalized saved dream config = %#v", snapshot.DreamConfig)
+	}
+}
+
+func TestPetServiceReadSettlesOfflineStateAndPersistsOnlyState(t *testing.T) {
+	const now = int64(1_800_000_000_000)
+	state := DefaultPetStateAt(now - 48*time.Hour.Milliseconds())
+	state.PetID = DefaultPetID
+	repository := &memoryPetRepository{
+		snapshot: PetMigrationSnapshot{
+			PetID:      DefaultPetID,
+			State:      &state,
+			Experience: &PetExperience{PetID: DefaultPetID, TotalExp: 42},
+			Care:       &PetCareConfig{PetID: DefaultPetID, AutoCareEnabled: true},
+			PlanRecords: []PetPlanRecord{{
+				PetID:  DefaultPetID,
+				PlanID: "keep-plan",
+			}},
+			Memories: []PetMemoryRecord{{PetID: DefaultPetID, ID: "keep-memory"}},
+		},
+	}
+	service := NewPetService(repository)
+
+	settled, err := service.Tick(now)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if settled.Hunger != 0 || settled.Cleanliness != 0 || settled.Mood != 0 || settled.LastTickAt != now {
+		t.Fatalf("offline settled state = %#v, want 24h-capped zero attributes at now", settled)
+	}
+
+	persisted := repository.getSnapshot()
+	if persisted.State == nil || *persisted.State != settled {
+		t.Fatalf("persisted state = %#v, want %#v", persisted.State, settled)
+	}
+	if persisted.Experience == nil || persisted.Experience.TotalExp != 42 || persisted.Care == nil || !persisted.Care.AutoCareEnabled {
+		t.Fatalf("non-state snapshot fields changed: experience=%#v care=%#v", persisted.Experience, persisted.Care)
+	}
+	if len(persisted.PlanRecords) != 1 || persisted.PlanRecords[0].PlanID != "keep-plan" || len(persisted.Memories) != 1 {
+		t.Fatalf("history/config collections were lost: plans=%#v memories=%#v", persisted.PlanRecords, persisted.Memories)
+	}
+	if repository.saveCount != 1 {
+		t.Fatalf("save count = %d, want one state-only settlement", repository.saveCount)
+	}
+}
+
+func TestPetServiceFeedSettlesOfflineStateBeforeApplyingAction(t *testing.T) {
+	state := DefaultPetStateAt(time.Now().Add(-48 * time.Hour).UnixMilli())
+	state.PetID = DefaultPetID
+	repository := &memoryPetRepository{snapshot: PetMigrationSnapshot{State: &state}}
+	service := NewPetService(repository)
+
+	result, err := service.Feed()
+	if err != nil {
+		t.Fatalf("Feed() error = %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("Feed() result = %#v, want success after offline settlement", result)
+	}
+
+	persisted := repository.getSnapshot()
+	if persisted.State == nil {
+		t.Fatal("persisted state is nil")
+	}
+	if persisted.State.Hunger != 35 || persisted.State.Cleanliness != 0 || persisted.State.Mood != 0 {
+		t.Fatalf("fed offline state = %#v, want hunger 35, cleanliness 0, mood unchanged at 0", persisted.State)
+	}
+	if persisted.State.Coins != 110 {
+		t.Fatalf("fed offline coins = %d, want 110", persisted.State.Coins)
+	}
+}
+
+func TestPetServiceSettingsSnapshotSettlesStateWithoutDroppingHeavyData(t *testing.T) {
+	state := DefaultPetStateAt(time.Now().Add(-48 * time.Hour).UnixMilli())
+	state.PetID = DefaultPetID
+	repository := &memoryPetRepository{
+		snapshot: PetMigrationSnapshot{
+			State:       &state,
+			Experience:  &PetExperience{PetID: DefaultPetID, TotalExp: 7},
+			PlanRecords: []PetPlanRecord{{PetID: DefaultPetID, PlanID: "settings-plan"}},
+			Memories:    []PetMemoryRecord{{PetID: DefaultPetID, ID: "settings-memory"}},
+		},
+	}
+
+	settings, err := NewPetService(repository).GetSettingsSnapshot(DefaultPetID)
+	if err != nil {
+		t.Fatalf("GetSettingsSnapshot() error = %v", err)
+	}
+	if settings.State.Hunger != 0 || settings.State.Cleanliness != 0 || settings.State.Mood != 0 {
+		t.Fatalf("settings state = %#v, want settled offline state", settings.State)
+	}
+
+	persisted := repository.getSnapshot()
+	if persisted.State == nil || persisted.State.Hunger != 0 || persisted.State.Cleanliness != 0 || persisted.State.Mood != 0 {
+		t.Fatalf("persisted settings state = %#v, want settled state", persisted.State)
+	}
+	if len(persisted.PlanRecords) != 1 || len(persisted.Memories) != 1 || persisted.Experience == nil || persisted.Experience.TotalExp != 7 {
+		t.Fatalf("light snapshot settlement dropped full data: %#v", persisted)
 	}
 }
 

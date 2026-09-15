@@ -35,6 +35,12 @@ type PetSettingsSnapshotRepository interface {
 	LoadSettingsSnapshot(context.Context, string) (PetMigrationSnapshot, error)
 }
 
+// petStateRepository 是离线结算需要的窄写边界。设置页的轻量快照不携带历史、
+// 皮肤和计划，结算只能写 state；通过可选接口接入不会破坏已有 PetRepository 实现。
+type petStateRepository interface {
+	SaveState(context.Context, PetState) error
+}
+
 // PetStore 是兼容旧命名的接口别名，避免调用方因为 repository/store 命名差异
 // 被迫引入第二套契约。
 type PetStore interface {
@@ -67,8 +73,8 @@ func NewPetServiceForPet(repository PetRepository, petID string) *PetService {
 	}
 }
 
-// Load 读取并补齐完整宠物快照。默认值只在服务内补齐，不在一次只读请求中
-// 隐式写库，避免初始化失败被误报成读取失败；后续成功动作会把完整快照落盘。
+// Load 读取、补齐并结算完整宠物快照。离线结算发生变化时只写入 PetState，
+// 这样读取动作就能和喂食等业务动作共享同一个时间边界，而不会覆盖其它数据。
 func (s *PetService) Load() (PetMigrationSnapshot, error) {
 	if err := s.validate(); err != nil {
 		return PetMigrationSnapshot{}, err
@@ -89,25 +95,42 @@ func (s *PetService) LoadSettingsSnapshot() (PetMigrationSnapshot, error) {
 	defer s.mu.Unlock()
 
 	ctx := context.Background()
+	nowMs := petNow(nil)
 	var (
 		snapshot PetMigrationSnapshot
 		err      error
 	)
-	if reader, ok := s.repository.(PetSettingsSnapshotRepository); ok {
+	_, hasStateWriter := s.repository.(petStateRepository)
+	if reader, ok := s.repository.(PetSettingsSnapshotRepository); ok && hasStateWriter {
 		snapshot, err = reader.LoadSettingsSnapshot(ctx, s.petID)
 	} else {
-		// 兼容旧 repository；这条路径只在宿主未实现轻量读取时触发。
+		// 没有窄写能力时必须读取完整快照，保证兼容回退保存结算状态时不会
+		// 用部分快照替换掉历史、皮肤或计划数据。
 		snapshot, err = s.repository.LoadSnapshot(ctx, s.petID)
 	}
 	if err != nil {
 		return PetMigrationSnapshot{}, fmt.Errorf("读取宠物设置快照 %q 失败: %w", s.petID, err)
 	}
-	return normalizePetSnapshot(snapshot, s.petID, petNow(nil)), nil
+	snapshot = normalizePetSnapshot(snapshot, s.petID, nowMs)
+	if err := s.settleSnapshotStateLocked(ctx, &snapshot, nowMs); err != nil {
+		return PetMigrationSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 // GetState 返回当前已经应用默认值和异常值归一化的宠物状态。
 func (s *PetService) GetState() (PetState, error) {
-	snapshot, err := s.Load()
+	return s.getStateAt(petNow(nil))
+}
+
+func (s *PetService) getStateAt(now int64) (PetState, error) {
+	if err := s.validate(); err != nil {
+		return PetState{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot, err := s.loadSnapshotLocked(context.Background(), now)
 	if err != nil {
 		return PetState{}, err
 	}
@@ -374,7 +397,17 @@ func (s *PetService) ClaimDailyBonus(now ...int64) (int64, error) {
 }
 
 func (s *PetService) GetCareConfig() (PetCareConfig, error) {
-	snapshot, err := s.Load()
+	return s.getCareConfigAt(petNow(nil))
+}
+
+func (s *PetService) getCareConfigAt(now int64) (PetCareConfig, error) {
+	if err := s.validate(); err != nil {
+		return PetCareConfig{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot, err := s.loadSnapshotLocked(context.Background(), now)
 	if err != nil {
 		return PetCareConfig{}, err
 	}
@@ -536,7 +569,33 @@ func (s *PetService) loadSnapshotLocked(ctx context.Context, now int64) (PetMigr
 	if err != nil {
 		return PetMigrationSnapshot{}, fmt.Errorf("读取宠物快照 %q 失败: %w", s.petID, err)
 	}
-	return normalizePetSnapshot(snapshot, s.petID, now), nil
+	snapshot = normalizePetSnapshot(snapshot, s.petID, now)
+	if err := s.settleSnapshotStateLocked(ctx, &snapshot, now); err != nil {
+		return PetMigrationSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func (s *PetService) settleSnapshotStateLocked(ctx context.Context, snapshot *PetMigrationSnapshot, now int64) error {
+	if snapshot == nil || snapshot.State == nil {
+		return nil
+	}
+	next := TickPet(*snapshot.State, now)
+	if reflect.DeepEqual(next, *snapshot.State) {
+		return nil
+	}
+	snapshot.State = &next
+
+	if writer, ok := s.repository.(petStateRepository); ok {
+		if err := writer.SaveState(ctx, next); err != nil {
+			return fmt.Errorf("保存宠物状态 %q 失败: %w", s.petID, err)
+		}
+		return nil
+	}
+
+	// 旧仓库没有单表写入口时，调用方传入的必须是完整快照；LoadSettingsSnapshot
+	// 已在上面主动走完整读取，避免兼容路径把未加载的集合误当成空集合保存。
+	return s.saveSnapshotLocked(ctx, *snapshot)
 }
 
 func (s *PetService) saveSnapshotLocked(ctx context.Context, snapshot PetMigrationSnapshot) error {

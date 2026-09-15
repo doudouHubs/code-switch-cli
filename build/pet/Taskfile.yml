@@ -1,0 +1,241 @@
+version: '3'
+
+# 独立宠物构建入口：wails3 task -dir build/pet package
+# 任务只负责桌宠 EXE 及其运行时资产，不改变主程序的构建任务。
+
+vars:
+  APP_NAME: CodeSwitchPet
+  BIN_DIR: bin/pet
+
+tasks:
+  build:
+    summary: Builds the standalone pet executable and stages its runtime assets
+    dir: ../..
+    deps:
+      - task: stage:assets
+        vars:
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+          PRODUCTION:
+            ref: .PRODUCTION
+    cmds:
+      - go build {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}.exe ./cmd/pet
+    vars:
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
+    env:
+      GOOS: windows
+      GOARCH: '{{.ARCH | default "amd64"}}'
+      CGO_ENABLED: 0
+      PRODUCTION: '{{.PRODUCTION | default "false"}}'
+
+  # 先生成共享前端，再清空独立包目录，避免旧版本文件混进发布包。
+  # 运行时入口从这个目录读取 frontend/dist 和 resources/pets，因此两份目录
+  # 必须在编译可执行文件之前就完成，并且源目录缺失时直接失败。
+  stage:assets:
+    internal: true
+    summary: Stages frontend and pet assets into the standalone package directory
+    dir: ../..
+    deps:
+      - task: frontend:build
+        vars:
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+          PRODUCTION:
+            ref: .PRODUCTION
+    cmds:
+      - cmd: >-
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command
+          '& {
+          $ErrorActionPreference = "Stop";
+          $root = [System.IO.Path]::GetFullPath(".");
+          $package = Join-Path $root "{{.BIN_DIR}}";
+          $embeddedRoot = Join-Path $root "cmd\pet";
+          $frontendSource = Join-Path $root "frontend\dist";
+          $petSource = Join-Path $root "resources\pets";
+          if (-not (Test-Path -LiteralPath $frontendSource -PathType Container)) { throw "frontend/dist does not exist: $frontendSource" };
+          if (-not (Test-Path -LiteralPath (Join-Path $frontendSource "index.html") -PathType Leaf)) { throw "frontend/dist/index.html does not exist: $frontendSource" };
+           if (-not (Test-Path -LiteralPath $petSource -PathType Container)) { throw "resources/pets does not exist: $petSource" };
+           if (@(Get-ChildItem -LiteralPath $frontendSource -Force).Count -eq 0) { throw "frontend/dist is empty: $frontendSource" };
+           if (@(Get-ChildItem -LiteralPath $petSource -Force).Count -eq 0) { throw "resources/pets is empty: $petSource" };
+           $petBinary = [System.IO.Path]::GetFullPath((Join-Path $package "{{.APP_NAME}}.exe"));
+           try {
+             $targetProcesses = @(
+               Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+                 if (-not $_.ExecutablePath) { return $false }
+                 try {
+                   [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                     [System.IO.Path]::GetFullPath($_.ExecutablePath),
+                     $petBinary
+                   )
+                 } catch {
+                   return $false
+                 }
+               }
+             );
+           } catch {
+             throw "无法检查独立宠物进程（目标：$petBinary）：$($_.Exception.Message)"
+           };
+           foreach ($targetProcess in $targetProcesses) {
+             $process = Get-Process -Id ([int]$targetProcess.ProcessId) -ErrorAction Stop;
+             if ($process.HasExited) { continue };
+             Write-Host "请求独立宠物优雅退出：PID=$($targetProcess.ProcessId) Path=$petBinary";
+             if (-not $process.CloseMainWindow()) {
+               throw "无法请求独立宠物优雅退出：PID=$($targetProcess.ProcessId) Path=$petBinary；请手动关闭后重试"
+             };
+             if (-not $process.WaitForExit(5000)) {
+               $process.Refresh();
+             };
+             if (-not $process.HasExited) {
+               throw "独立宠物未在 5 秒内退出：PID=$($targetProcess.ProcessId) Path=$petBinary；未执行强制终止，请手动关闭后重试"
+             };
+             Write-Host "独立宠物已退出：PID=$($targetProcess.ProcessId)";
+           };
+           $embeddedFrontend = Join-Path $embeddedRoot "dist";
+           $embeddedPets = Join-Path $embeddedRoot "resources\pets";
+           if (Test-Path -LiteralPath $embeddedFrontend) { Remove-Item -LiteralPath $embeddedFrontend -Recurse -Force };
+           if (Test-Path -LiteralPath $embeddedPets) { Remove-Item -LiteralPath $embeddedPets -Recurse -Force };
+           New-Item -ItemType Directory -Path $embeddedFrontend -Force | Out-Null;
+           New-Item -ItemType Directory -Path $embeddedPets -Force | Out-Null;
+           Get-ChildItem -LiteralPath $frontendSource -Force | Copy-Item -Destination $embeddedFrontend -Recurse -Force;
+           Get-ChildItem -LiteralPath $petSource -Force | Copy-Item -Destination $embeddedPets -Recurse -Force;
+           try {
+             if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force -ErrorAction Stop };
+           } catch {
+             throw "无法清理独立宠物包：$package；目标文件可能仍被占用：$petBinary；请关闭对应进程后重试。原始错误：$($_.Exception.Message)"
+           };
+          $frontendTarget = Join-Path $package "frontend\dist";
+          $petTarget = Join-Path $package "resources\pets";
+          New-Item -ItemType Directory -Path $frontendTarget -Force | Out-Null;
+          New-Item -ItemType Directory -Path $petTarget -Force | Out-Null;
+          Get-ChildItem -LiteralPath $frontendSource -Force | Copy-Item -Destination $frontendTarget -Recurse -Force;
+          Get-ChildItem -LiteralPath $petSource -Force | Copy-Item -Destination $petTarget -Recurse -Force;
+          if (-not (Test-Path -LiteralPath (Join-Path $frontendTarget "index.html") -PathType Leaf)) { throw "staged frontend is incomplete: $frontendTarget" };
+          if (@(Get-ChildItem -LiteralPath $petTarget -Force).Count -eq 0) { throw "staged pet assets are empty: $petTarget" };
+          }'
+        platforms: [windows]
+      - cmd: |
+          set -eu
+          root="$(pwd)"
+          package="$root/{{.BIN_DIR}}"
+          embedded_root="$root/cmd/pet"
+          frontend_source="$root/frontend/dist"
+          pet_source="$root/resources/pets"
+          test -d "$frontend_source"
+          test -f "$frontend_source/index.html"
+          test -d "$pet_source"
+          test "$(find "$frontend_source" -mindepth 1 -print -quit)" 
+          test "$(find "$pet_source" -mindepth 1 -print -quit)"
+          rm -rf "$embedded_root/dist" "$embedded_root/resources/pets"
+          mkdir -p "$embedded_root/dist" "$embedded_root/resources/pets"
+          cp -R "$frontend_source"/. "$embedded_root/dist"
+          cp -R "$pet_source"/. "$embedded_root/resources/pets"
+          rm -rf "$package"
+          mkdir -p "$package/frontend/dist" "$package/resources/pets"
+          cp -R "$frontend_source"/. "$package/frontend/dist"
+          cp -R "$pet_source"/. "$package/resources/pets"
+        platforms: [linux, darwin]
+
+  # 公共前端任务的源目录相对于仓库根解析；独立 Taskfile 从 build/pet 被选中时，
+  # 这里显式回到仓库根再调用 common，保证绑定生成和 Vite 构建仍复用主项目流程。
+  frontend:build:
+    internal: true
+    summary: Builds the shared frontend through the repository task
+    dir: ../..
+    deps:
+      - task: prepare:embed
+    cmds:
+      - wails3 task common:build:frontend
+    env:
+      BUILD_FLAGS: '{{.BUILD_FLAGS | default ""}}'
+      PRODUCTION: '{{.PRODUCTION | default "false"}}'
+
+  # go:embed 在绑定生成阶段也会校验目录是否存在；干净 checkout 尚未有构建产物，
+  # 先放置临时占位文件满足 Go 包加载，stage:assets 会在最终编译前彻底替换它们。
+  prepare:embed:
+    internal: true
+    summary: Prepares temporary directories required by go:embed
+    dir: ../..
+    cmds:
+      - cmd: >-
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command
+          '& {
+          $ErrorActionPreference = "Stop";
+          $dist = Join-Path (Get-Location) "cmd\pet\dist";
+          $pets = Join-Path (Get-Location) "cmd\pet\resources\pets";
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null;
+          New-Item -ItemType Directory -Path $pets -Force | Out-Null;
+          $distPlaceholder = Join-Path $dist ".codeswitch-pet-embed-placeholder";
+          $petsPlaceholder = Join-Path $pets ".codeswitch-pet-embed-placeholder";
+          if (-not (Test-Path -LiteralPath $distPlaceholder -PathType Leaf)) { New-Item -ItemType File -Path $distPlaceholder -Force | Out-Null };
+          if (-not (Test-Path -LiteralPath $petsPlaceholder -PathType Leaf)) { New-Item -ItemType File -Path $petsPlaceholder -Force | Out-Null };
+          }'
+        platforms: [windows]
+      - cmd: |
+          set -eu
+          mkdir -p cmd/pet/dist cmd/pet/resources/pets
+          test -f cmd/pet/dist/.codeswitch-pet-embed-placeholder || touch cmd/pet/dist/.codeswitch-pet-embed-placeholder
+          test -f cmd/pet/resources/pets/.codeswitch-pet-embed-placeholder || touch cmd/pet/resources/pets/.codeswitch-pet-embed-placeholder
+        platforms: [linux, darwin]
+
+  package:
+    summary: Packages the standalone pet executable and runtime assets into a ZIP
+    deps:
+      - task: build
+        vars:
+          PRODUCTION: "true"
+    cmds:
+      - task: archive
+
+  # ZIP 的根目录直接对应独立包目录内容，宿主启动后无需再猜测解压层级。
+  # 压缩完成后重新读取 ZIP 条目，确保发布物没有漏掉可执行文件或任一类资源。
+  archive:
+    internal: true
+    summary: Archives and verifies the standalone pet package
+    dir: ../..
+    cmds:
+      - cmd: >-
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command
+          '& {
+          $ErrorActionPreference = "Stop";
+          $root = [System.IO.Path]::GetFullPath(".");
+          $package = Join-Path $root "{{.BIN_DIR}}";
+          $binary = Join-Path $package "{{.APP_NAME}}.exe";
+          $frontendIndex = Join-Path $package "frontend\dist\index.html";
+          $petAssets = Join-Path $package "resources\pets";
+          $archive = Join-Path $root "bin\{{.APP_NAME}}-windows-{{.ARCH | default "amd64"}}.zip";
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "standalone executable does not exist: $binary" };
+          if (-not (Test-Path -LiteralPath $frontendIndex -PathType Leaf)) { throw "staged frontend index does not exist: $frontendIndex" };
+          if (-not (Test-Path -LiteralPath $petAssets -PathType Container)) { throw "staged pet assets do not exist: $petAssets" };
+          if (@(Get-ChildItem -LiteralPath $petAssets -Force).Count -eq 0) { throw "staged pet assets are empty: $petAssets" };
+          if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force };
+          Add-Type -AssemblyName System.IO.Compression.FileSystem;
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($package, $archive, [System.IO.Compression.CompressionLevel]::Optimal, $false);
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($archive);
+          try {
+            # .NET 在 Windows 上可能用反斜杠写入 ZIP 条目；校验时统一成 ZIP 标准的 `/`。
+            $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace([char]92, "/").TrimEnd("/") });
+            foreach ($required in @("{{.APP_NAME}}.exe", "frontend/dist/index.html")) {
+              if ($entries -notcontains $required) { throw "ZIP is missing required entry: $required" }
+            };
+            if (-not (@($entries | Where-Object { $_ -like "resources/pets/*" }).Count -gt 0)) { throw "ZIP is missing resources/pets entries" };
+          } finally {
+            $zip.Dispose();
+          }
+          Write-Host "Created and verified $archive";
+          }'
+        platforms: [windows]
+      - cmd: |
+          set -eu
+          root="$(pwd)"
+          package="$root/{{.BIN_DIR}}"
+          archive="$root/bin/{{.APP_NAME}}-windows-{{.ARCH | default "amd64"}}.zip"
+          test -f "$package/{{.APP_NAME}}.exe"
+          test -f "$package/frontend/dist/index.html"
+          test -d "$package/resources/pets"
+          rm -f "$archive"
+          (cd "$package" && zip -qr "$archive" .)
+          unzip -l "$archive" | grep -q "{{.APP_NAME}}.exe"
+          unzip -l "$archive" | grep -q "frontend/dist/index.html"
+          unzip -l "$archive" | grep -q "resources/pets/"
+          printf 'Created and verified %s\n' "$archive"
+        platforms: [linux, darwin]

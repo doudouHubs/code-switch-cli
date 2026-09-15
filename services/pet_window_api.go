@@ -11,13 +11,38 @@ var (
 // 配置落盘由 PetService 负责，调用方在确认保存成功后再调用这里的生命周期方法。
 type PetWindowAPI struct {
 	window *PetWindow
+	proxy  PetWindowProxy
+}
+
+// PetWindowProxy 是主程序控制外置桌宠窗口的最小接口。它只承载窗口状态和
+// 原生几何操作，不把 PetService 或 Wails application 泄漏到跨进程边界。
+type PetWindowProxy interface {
+	Open() error
+	Close() error
+	Toggle() error
+	SetMode(string) error
+	Move(int, int) error
+	IdleSeconds() (int, error)
+	Resize(int, int) error
+	Focus() error
+	SetAlwaysOnTop(bool) error
+	SetPlatformLayer(string) error
+	GetPlatforms() (PetWindowPlatformSnapshot, error)
+	State() PetWindowState
 }
 
 func NewPetWindowAPI(window *PetWindow) *PetWindowAPI {
 	return &PetWindowAPI{window: window}
 }
 
+func NewPetWindowAPIWithProxy(proxy PetWindowProxy) *PetWindowAPI {
+	return &PetWindowAPI{proxy: proxy}
+}
+
 func (a *PetWindowAPI) Open() error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.Open()
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -26,6 +51,9 @@ func (a *PetWindowAPI) Open() error {
 }
 
 func (a *PetWindowAPI) Close() error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.Close()
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -34,6 +62,9 @@ func (a *PetWindowAPI) Close() error {
 }
 
 func (a *PetWindowAPI) Toggle() error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.Toggle()
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -43,6 +74,9 @@ func (a *PetWindowAPI) Toggle() error {
 
 // 以下方法只负责 Wails 参数适配和统一 nil 兜底，具体窗口行为仍由 PetWindow 状态机决定。
 func (a *PetWindowAPI) SetMode(mode string) error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.SetMode(mode)
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -51,6 +85,9 @@ func (a *PetWindowAPI) SetMode(mode string) error {
 }
 
 func (a *PetWindowAPI) Move(x, y int) error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.Move(x, y)
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -61,6 +98,9 @@ func (a *PetWindowAPI) Move(x, y int) error {
 // IdleSeconds 返回系统级最后输入到当前时刻的秒数。
 // 该能力不属于窗口 driver：Windows 需要直接读取 user32，全局窗口状态机不应被平台 API 污染。
 func (a *PetWindowAPI) IdleSeconds() (int, error) {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.IdleSeconds()
+	}
 	if _, err := a.getWindow(); err != nil {
 		return 0, err
 	}
@@ -68,6 +108,9 @@ func (a *PetWindowAPI) IdleSeconds() (int, error) {
 }
 
 func (a *PetWindowAPI) Resize(width, height int) error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.Resize(width, height)
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -76,6 +119,9 @@ func (a *PetWindowAPI) Resize(width, height int) error {
 }
 
 func (a *PetWindowAPI) Focus() error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.Focus()
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -84,6 +130,9 @@ func (a *PetWindowAPI) Focus() error {
 }
 
 func (a *PetWindowAPI) SetAlwaysOnTop(alwaysOnTop bool) error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.SetAlwaysOnTop(alwaysOnTop)
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -93,6 +142,9 @@ func (a *PetWindowAPI) SetAlwaysOnTop(alwaysOnTop bool) error {
 
 // SetPlatformLayer 将桌宠放到指定外部窗口上方；空字符串表示桌面地面并恢复常驻置顶。
 func (a *PetWindowAPI) SetPlatformLayer(platformID string) error {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.SetPlatformLayer(platformID)
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return err
@@ -103,6 +155,9 @@ func (a *PetWindowAPI) SetPlatformLayer(platformID string) error {
 // GetPlatforms 返回当前桌宠所在工作区内的外部窗口平台。
 // 平台检测失败时由平台 driver 返回 Available=false；这条增强能力不能阻断桌宠本身运行。
 func (a *PetWindowAPI) GetPlatforms() (PetWindowPlatformSnapshot, error) {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.GetPlatforms()
+	}
 	window, err := a.getWindow()
 	if err != nil {
 		return PetWindowPlatformSnapshot{}, err
@@ -111,6 +166,9 @@ func (a *PetWindowAPI) GetPlatforms() (PetWindowPlatformSnapshot, error) {
 }
 
 func (a *PetWindowAPI) State() PetWindowState {
+	if a != nil && a.window == nil && a.proxy != nil {
+		return a.proxy.State()
+	}
 	if a == nil || a.window == nil {
 		return PetWindowState{
 			Version:      PetSchemaVersion,

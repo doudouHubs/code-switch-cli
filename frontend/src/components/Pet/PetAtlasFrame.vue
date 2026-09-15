@@ -86,6 +86,7 @@ const BEHAVIOR_DISPLAY_HEIGHTS: Record<string, number> = {
   swim: 80,
   zen: 112,
   play: 110,
+  work: 100,
   drag: 126,
   beg: 118,
   'report-time': 100
@@ -496,6 +497,7 @@ onBeforeUnmount(() => {
 .pet-atlas-frame__body.is-swim { animation: pet-atlas-swim 1.1s ease-in-out infinite; }
 .pet-atlas-frame__body.is-zen { animation: pet-atlas-zen 2.6s ease-in-out infinite alternate; }
 .pet-atlas-frame__body.is-play { animation: pet-atlas-play 0.55s ease-out infinite; }
+.pet-atlas-frame__body.is-work { animation: pet-atlas-work 0.28s ease-in-out infinite alternate; }
 .pet-atlas-frame__body.is-drag { animation: pet-atlas-drag 0.8s ease-in-out infinite alternate; }
 .pet-atlas-frame__body.is-beg { animation: pet-atlas-beg 0.7s ease-in-out infinite; }
 .pet-atlas-frame__body.is-report-time { animation: pet-atlas-report-time 0.8s ease-in-out infinite; }
@@ -602,6 +604,11 @@ onBeforeUnmount(() => {
 @keyframes pet-atlas-play {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-16px); }
+}
+
+@keyframes pet-atlas-work {
+  from { transform: translateY(0) rotate(-1deg); }
+  to { transform: translateY(1px) rotate(1deg); }
 }
 
 @keyframes pet-atlas-drag {

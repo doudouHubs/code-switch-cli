@@ -137,7 +137,8 @@ func PetFeed(state PetState) (PetState, PetActionResult) {
 	}
 	state.Coins -= PetFeedCost
 	state.Hunger = clampPetNumber(state.Hunger+35, 0, 100)
-	state.Mood = clampPetNumber(state.Mood+2, 0, 100)
+	// 喂食只负责恢复饱食度；心情由玩耍、抚摸和时间规则负责，避免一次照料
+	// 同时改变多个无关属性，让状态反馈和动作语义保持一一对应。
 	return state, PetActionResult{OK: true}
 }
 
@@ -157,7 +158,7 @@ func PetBathe(state PetState) (PetState, PetActionResult) {
 	}
 	state.Coins -= PetBatheCost
 	state.Cleanliness = clampPetNumber(state.Cleanliness+45, 0, 100)
-	state.Mood = clampPetNumber(state.Mood+1, 0, 100)
+	// 洗澡只负责恢复清洁度；不额外赠送心情，避免与喂食、玩耍的反馈边界混淆。
 	return state, PetActionResult{OK: true}
 }
 

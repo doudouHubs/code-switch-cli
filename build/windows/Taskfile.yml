@@ -8,6 +8,12 @@ tasks:
     summary: Builds the application for Windows
     deps:
       - task: common:go:mod:tidy
+      - task: common:pet:build
+        vars:
+          PRODUCTION:
+            ref: .PRODUCTION
+          ARCH:
+            ref: .ARCH
       - task: common:build:frontend
         vars:
           BUILD_FLAGS:

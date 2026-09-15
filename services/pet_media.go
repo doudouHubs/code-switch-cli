@@ -878,7 +878,7 @@ func validPetActionID(id string) bool {
 }
 
 func canonicalActionIndex(actionID string) int {
-	for index, builtin := range []string{"idle", "walk", "sleep", "beg", "eat", "munch", "bathe", "soak", "swim", "zen", "play", "held", "report-time"} {
+	for index, builtin := range []string{"idle", "walk", "sleep", "beg", "eat", "munch", "bathe", "soak", "swim", "zen", "play", "work", "held", "report-time"} {
 		if actionID == builtin {
 			return index
 		}

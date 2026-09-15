@@ -35,6 +35,10 @@ const (
 	PetLinkMethodAttach   = "link.attach"
 	PetLinkMethodPing     = "link.ping"
 	PetLinkMethodShutdown = "link.shutdown"
+
+	// PetLinkMethodRefreshTrayIcon 只通知独立进程重新读取当前皮肤；图标 PNG
+	// 由宠物进程从自己的资源和数据库生成，避免把大图或本地路径穿过 IPC。
+	PetLinkMethodRefreshTrayIcon = "pet.tray.icon.refresh"
 )
 
 var (

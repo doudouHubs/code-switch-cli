@@ -6,6 +6,7 @@ import (
 	"embed"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -821,8 +822,23 @@ func main() {
 					return
 				}
 				petWindowProxy.refreshState()
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if err := petProcess.RefreshTrayIcon(refreshCtx, services.DefaultPetID); err != nil {
+					log.Printf("⚠️ 独立宠物托盘图标刷新失败: %v", err)
+				}
+				cancel()
 				services.WriteRuntimeDiagnostic("pet-process-linked", "linked=true")
 				log.Println("✅ 独立宠物进程已联动")
+			}()
+		})
+		app.Event.On(petSettingsUpdatedEvent, func(event *application.CustomEvent) {
+			petID := petIDFromSettingsUpdatedEvent(event)
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if err := petProcess.RefreshTrayIcon(refreshCtx, petID); err != nil && !errors.Is(err, services.ErrPetLinkNotLinked) {
+					log.Printf("⚠️ 设置变更后刷新独立宠物托盘失败: %v", err)
+				}
 			}()
 		})
 	}
@@ -1148,6 +1164,24 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func petIDFromSettingsUpdatedEvent(event *application.CustomEvent) string {
+	if event != nil && event.Data != nil {
+		var payload struct {
+			PetID string `json:"petId"`
+		}
+		if raw, err := json.Marshal(event.Data); err == nil {
+			if err := json.Unmarshal(raw, &payload); err == nil {
+				if petID := strings.TrimSpace(payload.PetID); petID != "" {
+					return petID
+				}
+			}
+		}
+	}
+	// 旧事件或浏览器兼容事件可能不带 payload；当前独立进程只承载默认宠物，
+	// 因此这里明确回到默认分区，而不是把空 ID 交给跨进程协议猜测。
+	return services.DefaultPetID
 }
 
 func loadTrayIcon(path string) []byte {

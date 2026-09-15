@@ -86,6 +86,8 @@ func main() {
 	var app *application.App
 	var petWindow *services.PetWindow
 	var petWindowAPI *services.PetWindowAPI
+	var petTray *application.SystemTray
+	var petTrayIconMu sync.Mutex
 	var petKeyboardMonitor services.PetKeyboardMonitor
 	var stopOnce sync.Once
 	stopHeartbeat := make(chan struct{})
@@ -96,6 +98,32 @@ func main() {
 			}
 		},
 	})
+
+	refreshPetTrayIcon := func(petID string) error {
+		petTrayIconMu.Lock()
+		defer petTrayIconMu.Unlock()
+		if petTray == nil {
+			return errors.New("pet tray is unavailable")
+		}
+
+		petID = strings.TrimSpace(petID)
+		if petID == "" {
+			petID = services.DefaultPetID
+		}
+		icon, err := petService.GetTrayIcon(petID)
+		if err != nil {
+			// 当前皮肤读取失败不能让托盘入口消失；固定图标不依赖 atlas，
+			// 下次刷新仍会重新尝试读取当前皮肤，而不是永久锁死在兜底状态。
+			log.Printf("⚠️ 读取宠物托盘皮肤失败，使用固定兜底图标: %v", err)
+			icon = buildFallbackPetTrayIcon()
+		}
+		if len(icon) == 0 {
+			return errors.New("pet tray icon is empty")
+		}
+		petTray.SetIcon(icon)
+		petTray.SetDarkModeIcon(icon)
+		return nil
+	}
 
 	lifecycle := services.NewPetLinkLifecycle()
 	runtime := services.NewPetRuntime(petService, services.PetRuntimeOptions{})
@@ -126,6 +154,8 @@ func main() {
 			return petService.UpdateName(petID, params.Name)
 		case petSaveSettingsMethod:
 			return petService.SaveSettings(petID, params.Settings)
+		case services.PetLinkMethodRefreshTrayIcon:
+			return nil, refreshPetTrayIcon(petID)
 		case petWindowOpenMethod:
 			if petWindowAPI == nil {
 				return nil, errors.New("pet window api is unavailable")
@@ -215,6 +245,35 @@ func main() {
 	petWindowAPI = services.NewPetWindowAPI(petWindow)
 	app.RegisterService(application.NewService(petWindowAPI))
 	app.RegisterService(application.NewService(services.NewPetTypingAPI(petTypingController)))
+
+	petTray = app.SystemTray.New()
+	petTray.SetTooltip("CodeSwitch Pet")
+	if err := refreshPetTrayIcon(services.DefaultPetID); err != nil {
+		log.Printf("⚠️ 初始化宠物托盘图标失败: %v", err)
+	}
+	petTrayMenu := application.NewMenu()
+	petTrayMenu.Add("显示宠物").OnClick(func(_ *application.Context) {
+		if err := petWindow.Open(); err != nil {
+			log.Printf("⚠️ 从托盘打开宠物失败: %v", err)
+		}
+	})
+	petTrayMenu.Add("隐藏宠物").OnClick(func(_ *application.Context) {
+		if err := petWindow.Close(); err != nil {
+			log.Printf("⚠️ 从托盘隐藏宠物失败: %v", err)
+		}
+	})
+	petTrayMenu.Add("退出宠物").OnClick(func(_ *application.Context) {
+		if app != nil {
+			app.Quit()
+		}
+	})
+	petTray.SetMenu(petTrayMenu)
+	// 用户已明确选择仅通过右键菜单操作；覆盖 Wails 默认左键行为，避免默认
+	// handler 自动打开菜单或切换窗口，造成托盘交互与产品约定不一致。
+	petTray.OnClick(func() {})
+	petTray.OnRightClick(func() {
+		petTray.OpenMenu()
+	})
 
 	linkServer, err = services.NewPetLinkServer(services.PetLinkServerOptions{
 		Handler:   linkHandler,

@@ -16,9 +16,14 @@ import (
 )
 
 const (
-	petProcessModeEnv = "CODESWITCH_PET_MODE"
-	petProcessExeEnv  = "CODESWITCH_PET_EXECUTABLE"
+	petProcessModeEnv       = "CODESWITCH_PET_MODE"
+	petProcessExeEnv        = "CODESWITCH_PET_EXECUTABLE"
+	petSettingsUpdatedEvent = "pet.settings.updated"
 )
+
+type petTrayRefreshParams struct {
+	PetID string `json:"petId,omitempty"`
+}
 
 // petProcessManager 是 main 包唯一的独立桌宠编排入口。它不暴露业务方法，
 // 只负责选择嵌入/外置模式、启动并联动宿主；宠物行为仍由 PetService owner 处理。
@@ -163,4 +168,17 @@ func (m *petProcessManager) Stop(ctx context.Context) error {
 
 func (m *petProcessManager) Linked() bool {
 	return m.Enabled() && m.supervisor.Linked()
+}
+
+// RefreshTrayIcon 通知独立宠物重新读取当前皮肤。图标数据不经过主程序，避免
+// 设置事件把 atlas 的大图复制进命名管道，也让独立进程继续掌握自己的资源边界。
+func (m *petProcessManager) RefreshTrayIcon(ctx context.Context, petID string) error {
+	if !m.Enabled() {
+		return nil
+	}
+	petID = strings.TrimSpace(petID)
+	if petID == "" {
+		petID = services.DefaultPetID
+	}
+	return m.supervisor.Call(ctx, services.PetLinkMethodRefreshTrayIcon, petTrayRefreshParams{PetID: petID}, nil)
 }

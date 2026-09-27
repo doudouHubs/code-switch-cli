@@ -118,6 +118,14 @@ func TestPetLinkNamedPipeSupervisorRoundTrip(t *testing.T) {
 	if result["method"] != "pet.state" {
 		t.Fatalf("Call() result = %#v", result)
 	}
+
+	result = nil
+	if err := supervisor.Call(ctx, PetLinkMethodRefreshRuntime, map[string]string{"petId": "default"}, &result); err != nil {
+		t.Fatalf("supervisor.Call(RefreshRuntime) error = %v", err)
+	}
+	if result["method"] != PetLinkMethodRefreshRuntime {
+		t.Fatalf("RefreshRuntime result = %#v", result)
+	}
 	if err := supervisor.Stop(ctx); err != nil {
 		t.Fatalf("supervisor.Stop() error = %v", err)
 	}

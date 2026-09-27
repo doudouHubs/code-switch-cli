@@ -87,6 +87,7 @@ func TestPetStudioSaveSkinRejectsUnsafeIDDataURLAndOversizedAtlas(t *testing.T) 
 	}{
 		{name: "path traversal id", mutate: func(request *PetStudioSaveSkinRequest) { request.SkinID = "../escape" }, want: "skinId"},
 		{name: "absolute id", mutate: func(request *PetStudioSaveSkinRequest) { request.SkinID = `C:\\outside` }, want: "skinId"},
+		{name: "new unicode id", mutate: func(request *PetStudioSaveSkinRequest) { request.SkinID = "一二-mshlbamm-DCtGdI" }, want: "skinId"},
 		{name: "data url", mutate: func(request *PetStudioSaveSkinRequest) { request.Atlas = "data:image/png;base64," + request.Atlas }, want: "bare base64"},
 		{name: "oversized atlas", mutate: func(request *PetStudioSaveSkinRequest) {
 			request.Atlas = strings.Repeat("A", base64.StdEncoding.EncodedLen(int(petAtlasMaxImageBytes))+1)
@@ -236,6 +237,66 @@ func TestPetStudioReadSkinDefaultAndCustomArePathSafeAndPetScoped(t *testing.T) 
 	}
 }
 
+func TestPetStudioLegacyUnicodeSkinCanReadUpdateBindAndDelete(t *testing.T) {
+	root := t.TempDir()
+	store := &petStudioTestStore{}
+	legacyID := "一二-mshlbamm-DCtGdI"
+	request := seedPetStudioSkin(t, root, store, DefaultPetID, legacyID)
+	service := NewPetStudioAPIService(store, PetStudioAPIOptions{Root: root})
+
+	loaded, err := service.ReadSkin(DefaultPetID, legacyID)
+	if err != nil {
+		t.Fatalf("ReadSkin(legacy) error = %v", err)
+	}
+	if loaded.Skin.SkinID != legacyID || loaded.Skin.Builtin {
+		t.Fatalf("ReadSkin(legacy) skin = %#v", loaded.Skin)
+	}
+	if loaded.Atlas.Src == "" || len(loaded.Atlas.Manifest) == 0 {
+		t.Fatalf("ReadSkin(legacy) atlas = %#v", loaded.Atlas)
+	}
+
+	request.Name = "Legacy updated"
+	request.Bind = true
+	updated, err := service.SaveSkin(DefaultPetID, request)
+	if err != nil {
+		t.Fatalf("SaveSkin(legacy update) error = %v", err)
+	}
+	if updated.SkinID != legacyID || updated.Path != "" || updated.AtlasPath != "" {
+		t.Fatalf("SaveSkin(legacy update) result = %#v", updated)
+	}
+	selection, ok := store.selection[DefaultPetID]
+	if !ok || selection.ActiveSkinID == nil || *selection.ActiveSkinID != legacyID {
+		t.Fatalf("legacy selection = %#v", selection)
+	}
+	if stored := store.records[petStudioTestStoreKey(DefaultPetID, legacyID)]; stored.Name != request.Name {
+		t.Fatalf("stored legacy skin = %#v", stored)
+	}
+
+	if err := service.DeleteSkin(DefaultPetID, legacyID); err != nil {
+		t.Fatalf("DeleteSkin(legacy) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, legacyID)); !os.IsNotExist(err) {
+		t.Fatalf("legacy skin directory still exists or returned unexpected error: %v", err)
+	}
+	if _, ok := store.records[petStudioTestStoreKey(DefaultPetID, legacyID)]; ok {
+		t.Fatal("legacy skin record still exists after deletion")
+	}
+}
+
+func TestPetStudioStoredSkinIDRejectsPathSyntax(t *testing.T) {
+	service := NewPetStudioAPIService(&petStudioTestStore{}, PetStudioAPIOptions{Root: t.TempDir()})
+	for _, skinID := range []string{"../escape", ".", "..", `C:\\outside`, "nested/name", "nested\\name", "bad\x00"} {
+		t.Run(strings.ReplaceAll(skinID, "\\", "slash"), func(t *testing.T) {
+			if _, err := service.ReadSkin(DefaultPetID, skinID); err == nil {
+				t.Fatalf("ReadSkin(%q) unexpectedly succeeded", skinID)
+			}
+			if err := service.DeleteSkin(DefaultPetID, skinID); err == nil {
+				t.Fatalf("DeleteSkin(%q) unexpectedly succeeded", skinID)
+			}
+		})
+	}
+}
+
 func TestPetStudioSaveSkinRollsBackFilesWhenDatabaseFails(t *testing.T) {
 	root := t.TempDir()
 	store := &petStudioTestStore{upsertErr: os.ErrPermission}
@@ -374,6 +435,39 @@ func petStudioTestRequest(t *testing.T) PetStudioSaveSkinRequest {
 		Atlas:        base64.StdEncoding.EncodeToString(atlas),
 		ManifestJSON: petStudioTestManifest(t, 2, 2, map[string]PetAtlasAnimation{"idle": petStudioTestAnimation()}),
 	}
+}
+
+func seedPetStudioSkin(t *testing.T, root string, store *petStudioTestStore, petID, skinID string) PetStudioSaveSkinRequest {
+	t.Helper()
+	request := petStudioTestRequest(t)
+	request.SkinID = skinID
+	request.Name = "Legacy skin"
+	atlasBytes, err := base64.StdEncoding.DecodeString(request.Atlas)
+	if err != nil {
+		t.Fatalf("decode test atlas: %v", err)
+	}
+	target := filepath.Join(root, skinID)
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("create seeded skin directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "atlas.png"), atlasBytes, 0o600); err != nil {
+		t.Fatalf("write seeded atlas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "pet.json"), request.ManifestJSON, 0o600); err != nil {
+		t.Fatalf("write seeded manifest: %v", err)
+	}
+	if store.records == nil {
+		store.records = make(map[string]PetSkinRecord)
+	}
+	store.records[petStudioTestStoreKey(petID, skinID)] = PetSkinRecord{
+		PetID:        petID,
+		SkinID:       skinID,
+		Name:         request.Name,
+		Path:         target,
+		AtlasPath:    filepath.Join(target, "atlas.png"),
+		ManifestJSON: append(json.RawMessage(nil), request.ManifestJSON...),
+	}
+	return request
 }
 
 func petStudioTestAnimation() PetAtlasAnimation {

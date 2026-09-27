@@ -30,6 +30,7 @@ const (
 	petSnapshotMethod        = "pet.snapshot"
 	petSettingsMethod        = "pet.settings"
 	petSaveSettingsMethod    = "pet.settings.save"
+	petSettingsUpdatedEvent  = "pet.settings.updated"
 	petNameMethod            = "pet.name"
 	petPettedMethod          = "pet.petted"
 	petWindowOpenMethod      = "pet.window.open"
@@ -156,6 +157,14 @@ func main() {
 			return petService.SaveSettings(petID, params.Settings)
 		case services.PetLinkMethodRefreshTrayIcon:
 			return nil, refreshPetTrayIcon(petID)
+		case services.PetLinkMethodRefreshRuntime:
+			if app == nil {
+				return nil, errors.New("pet app is unavailable")
+			}
+			// 独立宠物拥有独立的 Wails event bus；主程序已经完成持久化，只把
+			// petId 作为失效信号传过来，由当前 renderer 重新读取共享数据库。
+			app.Event.Emit(petSettingsUpdatedEvent, map[string]string{"petId": petID})
+			return nil, nil
 		case petWindowOpenMethod:
 			if petWindowAPI == nil {
 				return nil, errors.New("pet window api is unavailable")
@@ -223,6 +232,14 @@ func main() {
 	app = application.New(application.Options{
 		Name:        "CodeSwitch Pet",
 		Description: "Independent CodeSwitch desktop pet",
+		ErrorHandler: func(err error) {
+			if err == nil {
+				return
+			}
+			// 独立桌宠与主程序共用 WebView2 补丁，也必须在致命初始化错误前留现场。
+			log.Printf("Wails runtime error: %v", err)
+			services.WriteRuntimeDiagnostic("wails-runtime-error", fmt.Sprintf("error=%q", err.Error()))
+		},
 		Windows: application.WindowsOptions{
 			WndProcInterceptor: services.PetWindowWndProcInterceptor,
 		},

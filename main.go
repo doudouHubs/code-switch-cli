@@ -666,6 +666,14 @@ func main() {
 	app := application.New(application.Options{
 		Name:        "AI Code Studio",
 		Description: "Claude Code and Codex provier manager",
+		ErrorHandler: func(err error) {
+			if err == nil {
+				return
+			}
+			// WebView2 初始化类致命错误仍会退出；同步落盘确保 os.Exit 前保留 HRESULT。
+			log.Printf("Wails runtime error: %v", err)
+			services.WriteRuntimeDiagnostic("wails-runtime-error", fmt.Sprintf("error=%q", err.Error()))
+		},
 		Windows: application.WindowsOptions{
 			// Wails alpha.38 默认会让带 WS_EX_NOACTIVATE 的窗口按普通窗口
 			// 处理 WM_MOUSEACTIVATE；宠物 driver 在这里收敛原生防激活规则，
@@ -836,6 +844,9 @@ func main() {
 			go func() {
 				refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()
+				if err := petProcess.RefreshRuntime(refreshCtx, petID); err != nil && !errors.Is(err, services.ErrPetLinkNotLinked) {
+					log.Printf("⚠️ 设置变更后刷新独立宠物窗口失败: %v", err)
+				}
 				if err := petProcess.RefreshTrayIcon(refreshCtx, petID); err != nil && !errors.Is(err, services.ErrPetLinkNotLinked) {
 					log.Printf("⚠️ 设置变更后刷新独立宠物托盘失败: %v", err)
 				}

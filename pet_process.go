@@ -25,6 +25,10 @@ type petTrayRefreshParams struct {
 	PetID string `json:"petId,omitempty"`
 }
 
+type petRuntimeRefreshParams struct {
+	PetID string `json:"petId,omitempty"`
+}
+
 // petProcessManager 是 main 包唯一的独立桌宠编排入口。它不暴露业务方法，
 // 只负责选择嵌入/外置模式、启动并联动宿主；宠物行为仍由 PetService owner 处理。
 type petProcessManager struct {
@@ -181,4 +185,18 @@ func (m *petProcessManager) RefreshTrayIcon(ctx context.Context, petID string) e
 		petID = services.DefaultPetID
 	}
 	return m.supervisor.Call(ctx, services.PetLinkMethodRefreshTrayIcon, petTrayRefreshParams{PetID: petID}, nil)
+}
+
+// RefreshRuntime 通知独立宠物窗口重新读取已经由主程序落盘的设置。皮肤选择属于
+// 低频配置，不能依赖主进程的 Wails event 直接跨进程传播；由独立端 Emit 本地事件
+// 后，PetWindow 才会失效 atlas 缓存并加载新快照。
+func (m *petProcessManager) RefreshRuntime(ctx context.Context, petID string) error {
+	if !m.Enabled() {
+		return nil
+	}
+	petID = strings.TrimSpace(petID)
+	if petID == "" {
+		petID = services.DefaultPetID
+	}
+	return m.supervisor.Call(ctx, services.PetLinkMethodRefreshRuntime, petRuntimeRefreshParams{PetID: petID}, nil)
 }

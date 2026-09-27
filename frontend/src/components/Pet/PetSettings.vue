@@ -1047,8 +1047,10 @@ async function saveSettings(): Promise<boolean> {
   assignForm(normalized)
   try {
     const next = await petApi.saveSettings(props.petId, normalized)
-    // 配置已经落盘后才驱动原生窗口；副作用失败必须进入 catch，不能把部分成功伪装成完整成功。
-    await petApi.setWindowEnabled(next.window.enabled)
+    const windowEnabledChanged = snapshot.value?.window.enabled !== next.window.enabled
+
+    // 皮肤绑定已经由 SaveSettings 原子落盘；先让表单和独立桌宠收到新快照，不能因
+    // 无关的窗口 Open/Close 调用失败而把已保存的“当前使用”状态卡在旧皮肤上。
     skins.value = next.skins
     snapshot.value = next
     nameDraft.value = next.state.name
@@ -1058,6 +1060,10 @@ async function saveSettings(): Promise<boolean> {
     // 完整快照轮询同步 Agent、梦境配置和当前皮肤。
     petApi.invalidateAtlas(props.petId)
     void Events.Emit('pet.settings.updated', { petId: props.petId })
+
+    // 窗口开关只服务于 enabled 真正变化的场景。此前每次换皮肤都会重走一次
+    // Open/Close，独立进程短暂断线时会把“已保存的换肤”误报成失败。
+    if (windowEnabledChanged) await petApi.setWindowEnabled(next.window.enabled)
     emit('saved', next)
     return true
   } catch (error) {

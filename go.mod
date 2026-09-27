@@ -109,3 +109,7 @@ require (
 	modernc.org/memory v1.8.2 // indirect
 	muzzammil.xyz/jsonc v1.0.0 // indirect
 )
+
+// Wails alpha.38 依赖的 v1.0.22 会在可恢复的 WebView2 COM 错误后直接
+// os.Exit(1)。本地补丁回移官方 v1.0.27 的恢复策略，同时保持现有 Wails API。
+replace github.com/wailsapp/go-webview2 => ./third_party/go-webview2

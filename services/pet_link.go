@@ -39,6 +39,10 @@ const (
 	// PetLinkMethodRefreshTrayIcon 只通知独立进程重新读取当前皮肤；图标 PNG
 	// 由宠物进程从自己的资源和数据库生成，避免把大图或本地路径穿过 IPC。
 	PetLinkMethodRefreshTrayIcon = "pet.tray.icon.refresh"
+	// PetLinkMethodRefreshRuntime 让独立窗口重新 hydration 已落盘的低频设置，
+	// 例如当前皮肤。主进程和独立宠物的 Wails event 总线彼此隔离，不能只在
+	// 主进程 Emit 后假设桌宠 renderer 会收到通知。
+	PetLinkMethodRefreshRuntime = "pet.runtime.refresh"
 )
 
 var (

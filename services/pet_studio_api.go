@@ -114,9 +114,17 @@ func (s *PetStudioAPIService) SaveSkin(petID string, request PetStudioSaveSkinRe
 	if err != nil {
 		return PetSkinRecord{}, err
 	}
-	skinID, err := validatePetStudioSkinID(request.SkinID)
-	if err != nil {
-		return PetSkinRecord{}, err
+	skinID, skinIDErr := validatePetStudioSkinID(request.SkinID)
+	isLegacySkinID := false
+	if skinIDErr != nil {
+		// 迁移器会保留旧目录名作为主键；只有在后续确认数据库已有该记录时，
+		// 才允许历史 Unicode ID 进入更新流程，避免借兼容分支创建新的任意目录。
+		var legacyErr error
+		skinID, legacyErr = validatePetStudioStoredSkinID(request.SkinID)
+		if legacyErr != nil {
+			return PetSkinRecord{}, skinIDErr
+		}
+		isLegacySkinID = true
 	}
 	name, err := validatePetStudioText(request.Name, "皮肤名称", petStudioNameMaxLength, true)
 	if err != nil {
@@ -168,6 +176,10 @@ func (s *PetStudioAPIService) SaveSkin(petID string, request PetStudioSaveSkinRe
 		return PetSkinRecord{}, fmt.Errorf("读取已有皮肤失败: %w", err)
 	}
 	previous, found := findPetStudioSkin(records, skinID)
+	if isLegacySkinID && !found {
+		// 存量校验只服务于迁移来的记录；未知 Unicode ID 仍然遵守新建 ID 契约。
+		return PetSkinRecord{}, skinIDErr
+	}
 	// 内置 ID 必须永远由产品资源 owner 管理，不能通过 Studio upsert 覆盖成自定义记录。
 	if isBuiltinPetSkinID(skinID) || (found && previous.Builtin) {
 		return PetSkinRecord{}, errors.New("不能保存内置皮肤 ID")
@@ -260,7 +272,7 @@ func (s *PetStudioAPIService) DeleteSkin(petID, skinID string) error {
 	if err != nil {
 		return err
 	}
-	skinID, err = validatePetStudioSkinID(skinID)
+	skinID, err = validatePetStudioStoredSkinID(skinID)
 	if err != nil {
 		return err
 	}
@@ -429,7 +441,7 @@ func (s *PetStudioAPIService) ReadSkin(petID, skinID string) (PetStudioReadSkinR
 	}
 	skinID = strings.TrimSpace(skinID)
 	if skinID != "" {
-		if _, err := validatePetStudioSkinID(skinID); err != nil {
+		if _, err := validatePetStudioStoredSkinID(skinID); err != nil {
 			return PetStudioReadSkinResult{}, err
 		}
 	}
@@ -538,10 +550,32 @@ func validatePetStudioPetID(petID string) (string, error) {
 	return petID, nil
 }
 
+// validatePetStudioSkinID 只负责新建皮肤的 ID 契约，避免新资源继续产生无法跨环境处理的目录名。
 func validatePetStudioSkinID(skinID string) (string, error) {
 	skinID = strings.TrimSpace(skinID)
 	if !isSafePetSkinID(skinID) || len(skinID) > petStudioSkinIDMaxLength {
 		return "", errors.New("skinId 必须以字母开头，后续只能包含字母、数字、_ 或 -")
+	}
+	return skinID, nil
+}
+
+// validatePetStudioStoredSkinID 兼容迁移留下的历史 ID，但仍把输入限制为单一路径段，
+// 使 Unicode 兼容不会绕过 root、volume 或 symlink 边界检查。
+func validatePetStudioStoredSkinID(skinID string) (string, error) {
+	skinID = strings.TrimSpace(skinID)
+	if skinID == "" || skinID == "." || skinID == ".." {
+		return "", errors.New("skinId 必须是安全的单一路径段")
+	}
+	if !utf8.ValidString(skinID) || len(skinID) > petStudioSkinIDMaxLength {
+		return "", errors.New("skinId 必须是安全的单一路径段")
+	}
+	if filepath.IsAbs(skinID) || filepath.VolumeName(skinID) != "" || strings.ContainsAny(skinID, `/\\<>:\"|?*`) {
+		return "", errors.New("skinId 必须是安全的单一路径段")
+	}
+	for _, character := range skinID {
+		if character == 0 || unicode.IsControl(character) {
+			return "", errors.New("skinId 必须是安全的单一路径段")
+		}
 	}
 	return skinID, nil
 }

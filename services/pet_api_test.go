@@ -554,6 +554,30 @@ func TestPetServiceSaveSettingsMergesAndValidatesPetID(t *testing.T) {
 	}
 }
 
+func TestPetServiceSaveSettingsPreservesLegacyUnicodeSkinSelection(t *testing.T) {
+	legacyID := "一二-mshlbamm-DCtGdI"
+	repository := &memoryPetRepository{
+		snapshot: PetMigrationSnapshot{
+			State: &PetState{PetID: DefaultPetID, Name: "Kapi"},
+			Skins: []PetSkinRecord{{PetID: DefaultPetID, SkinID: legacyID, Name: "Legacy skin"}},
+		},
+	}
+	service := NewPetService(repository)
+	selection := PetSkinSelection{PetID: DefaultPetID, ActiveSkinID: &legacyID}
+
+	snapshot, err := service.SaveSettings(DefaultPetID, PetSettingsInput{SkinSelection: &selection})
+	if err != nil {
+		t.Fatalf("SaveSettings(legacy skin) error = %v", err)
+	}
+	if snapshot.SkinSelection.ActiveSkinID == nil || *snapshot.SkinSelection.ActiveSkinID != legacyID {
+		t.Fatalf("returned skin selection = %#v", snapshot.SkinSelection)
+	}
+	persisted := repository.getSnapshot()
+	if persisted.SkinSelection == nil || persisted.SkinSelection.ActiveSkinID == nil || *persisted.SkinSelection.ActiveSkinID != legacyID {
+		t.Fatalf("persisted skin selection = %#v", persisted.SkinSelection)
+	}
+}
+
 func TestPetServiceUpdateNameTrimsAndPreservesSnapshot(t *testing.T) {
 	repository := &memoryPetRepository{
 		snapshot: PetMigrationSnapshot{

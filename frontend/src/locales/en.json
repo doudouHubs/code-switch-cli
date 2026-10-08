@@ -1711,7 +1711,7 @@
       "savedSkins": "Saved skins",
       "noSkins": "No custom skins yet",
       "deleteConfirm": "Delete this skin?",
-      "validation": "Enter subject, provider, and model.",
+      "validation": "Enter a description of the pet's appearance first.",
       "fileReadFailed": "Unable to read the image file.",
       "atlasPreviewFailed": "Unable to read the atlas frame preview.",
       "atlasCropInvalid": "The atlas frame crop exceeds the image bounds.",

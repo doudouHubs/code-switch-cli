@@ -1713,7 +1713,7 @@
       "savedSkins": "已保存皮肤",
       "noSkins": "暂无自定义皮肤",
       "deleteConfirm": "删除这套皮肤？",
-      "validation": "请输入 subject、provider 和 model。",
+      "validation": "请先填写宠物外观描述。",
       "fileReadFailed": "无法读取图片文件。",
       "atlasPreviewFailed": "无法读取 atlas 帧预览。",
       "atlasCropInvalid": "atlas 帧裁剪区域越过图片边界。",

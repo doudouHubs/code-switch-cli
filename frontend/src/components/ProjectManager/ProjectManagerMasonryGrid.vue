@@ -3,10 +3,12 @@ import { onBeforeUnmount, onMounted, onUpdated, ref } from 'vue'
 
 const props = withDefaults(
   defineProps<{
-    minColumnWidth: number
+    minColumnWidth?: number
     gap?: number
   }>(),
   {
+    // 项目和会话列表共用会话卡片的列宽规则，避免调用处各自配置后再次分叉。
+    minColumnWidth: 280,
     gap: 18,
   },
 )

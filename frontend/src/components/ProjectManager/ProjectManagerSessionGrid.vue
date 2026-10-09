@@ -103,7 +103,7 @@ const handleSessionCardClick = (session: SessionSummary) => {
 </script>
 
 <template>
-  <ProjectManagerMasonryGrid class="session-grid" :min-column-width="280" :gap="18">
+  <ProjectManagerMasonryGrid class="session-grid">
     <article
       v-for="session in sessions"
       :key="session.id"

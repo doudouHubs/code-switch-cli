@@ -92,7 +92,7 @@ const handleProjectAction = (project: ProjectSummary, actionKey: string) => {
 </script>
 
 <template>
-  <ProjectManagerMasonryGrid class="project-grid" :min-column-width="340" :gap="18">
+  <ProjectManagerMasonryGrid class="project-grid">
     <article
       v-for="project in projects"
       :key="project.id"

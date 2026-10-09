@@ -78,16 +78,28 @@ tasks:
            foreach ($targetProcess in $targetProcesses) {
              $process = Get-Process -Id ([int]$targetProcess.ProcessId) -ErrorAction Stop;
              if ($process.HasExited) { continue };
-             Write-Host "请求独立宠物优雅退出：PID=$($targetProcess.ProcessId) Path=$petBinary";
-             if (-not $process.CloseMainWindow()) {
-               throw "无法请求独立宠物优雅退出：PID=$($targetProcess.ProcessId) Path=$petBinary；请手动关闭后重试"
-             };
-             if (-not $process.WaitForExit(5000)) {
-               $process.Refresh();
-             };
-             if (-not $process.HasExited) {
-               throw "独立宠物未在 5 秒内退出：PID=$($targetProcess.ProcessId) Path=$petBinary；未执行强制终止，请手动关闭后重试"
-             };
+              Write-Host "请求独立宠物优雅退出：PID=$($targetProcess.ProcessId) Path=$petBinary";
+              $closeRequested = $false;
+              try {
+                $closeRequested = $process.CloseMainWindow();
+              } catch {
+                Write-Host "无法发送独立宠物窗口退出消息，将使用进程终止兜底：$($_.Exception.Message)";
+              };
+              if ($closeRequested) {
+                [void]$process.WaitForExit(5000);
+                $process.Refresh();
+              };
+              if (-not $process.HasExited) {
+                # 透明/隐藏 Wails 窗口可能没有可关闭的主窗口；构建必须释放精确目标文件锁，
+                # 因此只对已按完整路径匹配到的独立宠物进程执行强制终止，并立即复核结果。
+                Write-Host "独立宠物未能优雅退出，强制结束目标进程：PID=$($targetProcess.ProcessId) Path=$petBinary";
+                Stop-Process -Id ([int]$targetProcess.ProcessId) -Force -ErrorAction Stop;
+                [void]$process.WaitForExit(5000);
+                $process.Refresh();
+              };
+              if (-not $process.HasExited) {
+                throw "独立宠物进程仍未退出：PID=$($targetProcess.ProcessId) Path=$petBinary；请手动关闭后重试"
+              };
              Write-Host "独立宠物已退出：PID=$($targetProcess.ProcessId)";
            };
            $embeddedFrontend = Join-Path $embeddedRoot "dist";

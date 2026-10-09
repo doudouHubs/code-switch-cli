@@ -247,7 +247,8 @@ export function createImportedPetStudioProject(
       ? { kind: 'skin', skinId: skin.skinId, canUpdate: skin.builtin !== true, atlas }
       : { kind: 'default', canUpdate: false, atlas },
     name: typeof manifest.name === 'string' ? manifest.name : skin?.name ?? 'Pet',
-    subject: typeof manifest.subject === 'string' ? manifest.subject : skin?.subject ?? '',
+    // SaveSkin 允许空 manifest 描述和非空记录描述并存；读取时沿用后端的非空优先规则。
+    subject: (typeof manifest.subject === 'string' ? manifest.subject.trim() : '') || skin?.subject?.trim() || '',
     modelId: typeof manifest.modelId === 'string' ? manifest.modelId : skin?.modelId ?? '',
     createdAt: typeof manifest.createdAt === 'number' ? manifest.createdAt : skin?.createdAt,
     updatedAt: typeof manifest.updatedAt === 'number' ? manifest.updatedAt : skin?.updatedAt,

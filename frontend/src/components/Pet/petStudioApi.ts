@@ -385,11 +385,17 @@ async function cropImageToPng(data: string, mediaType: string, crop: PetStudioFr
   return normalizeImageInput(result).data
 }
 
-async function materializeFrame(frame: PetStudioFrameInput): Promise<{ data: string; durationMs: number }> {
+// 生成参考图和保存图集共用真实帧读取，避免生成时把整张 atlas 当成单帧发送。
+export async function readPetStudioFrameImage(frame: PetStudioFrameInput): Promise<PetStudioGeneratedImage> {
   const image = normalizeImageInput(frame.data, frame.mediaType)
   const data = frame.crop
     ? await cropImageToPng(image.data, image.mediaType, frame.crop)
     : image.data
+  return { data, mediaType: frame.crop ? 'image/png' : image.mediaType }
+}
+
+async function materializeFrame(frame: PetStudioFrameInput): Promise<{ data: string; durationMs: number }> {
+  const { data } = await readPetStudioFrameImage(frame)
   const durationMs = Number.isInteger(frame.durationMs)
     ? Math.min(60_000, Math.max(16, frame.durationMs as number))
     : 500

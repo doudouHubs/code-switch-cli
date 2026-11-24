@@ -1,9 +1,11 @@
 frontend/node_modules
 frontend/bindings
 frontend/dist
+/cmd/pet/dist/
 .DS_Store
 .task
 bin
 .gocache/
 .ace-tool/
 mermaid/
+=ro

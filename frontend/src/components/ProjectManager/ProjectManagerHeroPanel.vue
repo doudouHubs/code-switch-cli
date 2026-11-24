@@ -27,6 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   'change-mode': [mode: ProjectManagerViewMode]
+  search: []
   refresh: []
   clear: []
   'toggle-selection': []
@@ -40,13 +41,29 @@ const keywordModel = computed({
   set: (value: string) => emit('update:modelValue', value),
 })
 
-const searchPlaceholder = computed(() =>
-  t(
-    props.conversationSearch
-      ? 'components.projectManager.toolbar.conversationSearchPlaceholder'
-      : 'components.projectManager.toolbar.searchPlaceholder',
-  ),
-)
+const searchPlaceholder = computed(() => {
+  if (props.conversationSearch) {
+    return t('components.projectManager.toolbar.conversationSearchPlaceholder')
+  }
+  if (props.activeMode === 'session') {
+    return t('components.projectManager.toolbar.sessionSearchPlaceholder')
+  }
+  return t('components.projectManager.toolbar.searchPlaceholder')
+})
+
+const handleSearchKeydown = (event: KeyboardEvent) => {
+  // 输入法确认候选词也会发出 Enter；忽略组合输入和长按重复事件，避免提前或重复搜索。
+  if (
+    event.isComposing ||
+    event.keyCode === 229 ||
+    event.repeat ||
+    props.selectionBusy
+  ) {
+    return
+  }
+  event.preventDefault()
+  emit('search')
+}
 </script>
 
 <template>
@@ -89,6 +106,7 @@ const searchPlaceholder = computed(() =>
           class="search-input"
           :disabled="selectionBusy"
           :placeholder="searchPlaceholder"
+          @keydown.enter="handleSearchKeydown"
         />
         <button
           v-if="modelValue"

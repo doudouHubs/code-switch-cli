@@ -6,13 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type ProjectSummary struct {
@@ -265,11 +261,12 @@ func (s *ProjectManagerService) RenameSession(sessionID string, displayName stri
 		return err
 	}
 
+	// 本地名称已生效；即使源索引回写失败，也必须清掉仍持有旧名称的缓存。
+	defer s.invalidateProjectManagerSnapshotCache()
+	defer s.invalidateProjectManagerConversationCache(sessionID)
 	if err := s.tryRenameCodexSessionIndex(sessionID, displayName); err != nil {
 		return fmt.Errorf("已保存本地会话别名，但回写 Codex 会话标题失败: %w", err)
 	}
-	s.invalidateProjectManagerSnapshotCache()
-	s.invalidateProjectManagerConversationCache(sessionID)
 	return nil
 }
 
@@ -748,85 +745,6 @@ func (s *ProjectManagerService) invalidateProjectManagerConversationCache(sessio
 	if s.conversationSearchCache != nil {
 		s.conversationSearchCache.delete(sessionID)
 	}
-}
-
-func (s *ProjectManagerService) removeCodexSessionIndexEntry(sessionID string) error {
-	home, err := getUserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	path := filepath.Join(home, ".codex", "session_index.jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	kept := make([]string, 0, len(lines))
-	removed := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if gjson.Get(trimmed, "id").String() == sessionID {
-			removed = true
-			continue
-		}
-		kept = append(kept, line)
-	}
-	if !removed {
-		return nil
-	}
-	if err := AtomicWriteText(path, strings.Join(kept, "\n")); err != nil {
-		return err
-	}
-	s.invalidateProjectManagerSnapshotCache()
-	return nil
-}
-
-func (s *ProjectManagerService) tryRenameCodexSessionIndex(sessionID string, displayName string) error {
-	home, err := getUserHomeDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(home, ".codex", "session_index.jsonl")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	changed := false
-	for index, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if gjson.Get(trimmed, "id").String() != sessionID {
-			continue
-		}
-		next, err := sjson.Set(trimmed, "thread_name", displayName)
-		if err != nil {
-			return err
-		}
-		lines[index] = next
-		changed = true
-		break
-	}
-	if !changed {
-		return fmt.Errorf("session_index.jsonl 中未找到会话 %s", sessionID)
-	}
-
-	if err := AtomicWriteText(path, strings.Join(lines, "\n")); err != nil {
-		return err
-	}
-	s.invalidateProjectManagerSnapshotCache()
-	return nil
 }
 
 func sanitizeProjectManagerSessionSummaryForTerminal(session SessionSummary) SessionSummary {

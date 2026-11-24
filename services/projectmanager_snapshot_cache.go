@@ -12,7 +12,7 @@ import (
 
 const (
 	projectManagerSnapshotCacheFile    = "project-manager-snapshot-cache.json"
-	projectManagerSnapshotCacheVersion = 4
+	projectManagerSnapshotCacheVersion = 5
 	projectManagerWarmRefreshMinGap    = 12 * time.Second
 )
 

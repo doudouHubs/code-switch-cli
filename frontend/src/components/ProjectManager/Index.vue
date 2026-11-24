@@ -91,6 +91,8 @@ const codexRuntimeSnapshot = ref<CodexRuntimeStatusSnapshot>({
 });
 const selectedProjectId = ref("");
 const searchKeyword = ref("");
+// 输入框保留编辑中的内容，会话列表和正文查询只消费按 Enter 提交的关键词。
+const submittedSessionSearchKeyword = ref("");
 const projectSessionSearchLoading = ref(false);
 const projectSessionSearchResults = ref<ProjectSessionSearchResult[]>([]);
 const projectSessionSearchResolvedKey = ref("");
@@ -134,9 +136,7 @@ const deleteState = reactive({
 });
 
 const projectManagerOpenTimeoutMs = 5000;
-const projectSessionSearchDelayMs = 300;
 const openingSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
-let projectSessionSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let projectSessionSearchRequestVersion = 0;
 let stopCodexStatusEvents: (() => void) | null = null;
 
@@ -152,6 +152,10 @@ const dateFormatter = computed(
 
 const normalizedKeyword = computed(() =>
   searchKeyword.value.trim().toLowerCase(),
+);
+
+const normalizedSessionSearchKeyword = computed(() =>
+  submittedSessionSearchKeyword.value.trim().toLowerCase(),
 );
 
 const normalizeCodexProjectPathKey = (path: string) => {
@@ -299,10 +303,13 @@ const isProjectSessionSearchScope = computed(
 );
 
 const projectSessionSearchKey = computed(() => {
-  if (!isProjectSessionSearchScope.value || !normalizedKeyword.value) {
+  if (
+    !isProjectSessionSearchScope.value ||
+    !normalizedSessionSearchKeyword.value
+  ) {
     return "";
   }
-  return `${selectedProjectId.value}\n${normalizedKeyword.value}`;
+  return `${selectedProjectId.value}\n${normalizedSessionSearchKeyword.value}`;
 });
 
 const projectSessionSearchResultByID = computed(
@@ -326,6 +333,19 @@ const projectSessionSearchFailed = computed(
     !!projectSessionSearchKey.value &&
     projectSessionSearchErrorKey.value === projectSessionSearchKey.value,
 );
+
+const projectSessionSearchMatchesByID = computed(() => {
+  // 只向卡片提供当前已提交查询的成功结果；同词重搜期间保留预览，由忙碌状态禁用切换。
+  if (!projectSessionSearchResolved.value || projectSessionSearchFailed.value) {
+    return new Map<string, string[]>();
+  }
+  return new Map<string, string[]>(
+    projectSessionSearchResults.value.map((result) => [
+      result.session_id,
+      result.matched_contents,
+    ]),
+  );
+});
 
 const matchesKeyword = (fields: Array<string | undefined>, keyword: string) => {
   if (!keyword) {
@@ -351,7 +371,7 @@ const projectCards = computed(() => {
 
 const currentProjectSessions = computed(() => {
   const projectId = selectedProjectId.value;
-  const keyword = normalizedKeyword.value;
+  const keyword = normalizedSessionSearchKeyword.value;
   const projectSessions = snapshotSessions.value.filter(
     (session) => !projectId || session.project_id === projectId,
   );
@@ -368,7 +388,7 @@ const currentProjectSessions = computed(() => {
 });
 
 const flatSessionCards = computed(() => {
-  const keyword = normalizedKeyword.value;
+  const keyword = normalizedSessionSearchKeyword.value;
   return snapshotSessions.value.filter((session) =>
     matchesKeyword(
       [
@@ -462,7 +482,7 @@ const emptyStateMessage = computed(() => {
   if (!showProjectGrid.value && visibleSessions.value.length === 0) {
     if (
       isProjectSessionSearchScope.value &&
-      normalizedKeyword.value &&
+      normalizedSessionSearchKeyword.value &&
       projectSessionSearchResolved.value
     ) {
       return t("components.projectManager.states.noSessionSearchResults");
@@ -568,12 +588,34 @@ const invertVisibleSessionSelection = () => {
     .map((session) => session.id);
 };
 
-const clearProjectSessionSearchTimer = () => {
-  if (!projectSessionSearchTimer) {
+const submitSessionSearch = () => {
+  if (showProjectGrid.value || sessionOperationBusy.value) {
     return;
   }
-  clearTimeout(projectSessionSearchTimer);
-  projectSessionSearchTimer = null;
+
+  submittedSessionSearchKeyword.value = searchKeyword.value.trim();
+  if (!submittedSessionSearchKeyword.value) {
+    resetSessionSearch();
+    return;
+  }
+  if (isProjectSessionSearchScope.value) {
+    runProjectSessionSearch();
+  }
+};
+
+const clearSearch = () => {
+  searchKeyword.value = "";
+  resetSessionSearch();
+};
+
+const resetSessionSearch = () => {
+  // 清空或切换视角后立即作废旧请求，迟到的结果不能恢复已经取消的筛选。
+  projectSessionSearchRequestVersion += 1;
+  submittedSessionSearchKeyword.value = "";
+  projectSessionSearchLoading.value = false;
+  projectSessionSearchResults.value = [];
+  projectSessionSearchResolvedKey.value = "";
+  projectSessionSearchErrorKey.value = "";
 };
 
 const executeProjectSessionSearch = async (
@@ -606,8 +648,7 @@ const executeProjectSessionSearch = async (
   }
 };
 
-const scheduleProjectSessionSearch = () => {
-  clearProjectSessionSearchTimer();
+const runProjectSessionSearch = () => {
   const requestVersion = ++projectSessionSearchRequestVersion;
   const searchKey = projectSessionSearchKey.value;
   projectSessionSearchErrorKey.value = "";
@@ -620,20 +661,28 @@ const scheduleProjectSessionSearch = () => {
   }
 
   const projectPath = selectedProjectId.value;
-  const query = searchKeyword.value.trim();
+  const query = submittedSessionSearchKeyword.value;
   projectSessionSearchLoading.value = true;
-  projectSessionSearchTimer = setTimeout(() => {
-    projectSessionSearchTimer = null;
-    void executeProjectSessionSearch(
-      projectPath,
-      query,
-      searchKey,
-      requestVersion,
-    );
-  }, projectSessionSearchDelayMs);
+  void executeProjectSessionSearch(
+    projectPath,
+    query,
+    searchKey,
+    requestVersion,
+  );
 };
 
-watch(projectSessionSearchKey, scheduleProjectSessionSearch);
+// 返回项目列表时同时清空输入文本，避免会话关键词继续筛选项目卡片；同步清理阻止旧请求回写。
+watch(
+  [activeMode, selectedProjectId],
+  () => {
+    if (showProjectGrid.value) {
+      clearSearch();
+      return;
+    }
+    resetSessionSearch();
+  },
+  { flush: "sync" },
+);
 
 const loadSnapshot = async (isRefresh = false) => {
   const hasSnapshot =
@@ -933,10 +982,10 @@ const applySnapshot = (snapshot: ProjectManagerSnapshot) => {
     selectedProjectId.value = "";
   }
 
-  // 当前项目刷新后源文件和会话集合都可能变化；有效查询必须重跑，
-  // 否则卡片会继续消费刷新前的会话 ID 和正文片段。
+  // 刷新后只重跑已按 Enter 提交的查询，避免把尚未确认的输入当作新搜索，
+  // 同时确保结果中的会话 ID 和正文片段来自最新快照。
   if (projectSessionSearchKey.value) {
-    scheduleProjectSessionSearch();
+    runProjectSessionSearch();
   }
 };
 
@@ -1453,14 +1502,6 @@ const isProjectRunning = (projectID: string) =>
   runningProjectCommandId.value === projectID;
 
 const resolveSessionSummary = (session: SessionSummary) => {
-  if (projectSessionSearchResolved.value) {
-    const matchedContent = projectSessionSearchResultByID.value
-      .get(session.id)
-      ?.matched_content.trim();
-    if (matchedContent) {
-      return matchedContent;
-    }
-  }
   return (
     session.latest_user_message ||
     session.summary ||
@@ -1489,7 +1530,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopCodexStatusEvents?.();
   stopCodexStatusEvents = null;
-  clearProjectSessionSearchTimer();
   projectSessionSearchRequestVersion += 1;
   openingSessionTimers.forEach((timeoutId) => {
     clearTimeout(timeoutId);
@@ -1513,7 +1553,8 @@ onBeforeUnmount(() => {
       :cleanup-disabled="globalSessionCleanupDisabled"
       :cleanup-busy="globalSessionCleanupBusy"
       @change-mode="activeMode = $event"
-      @clear="searchKeyword = ''"
+      @search="submitSessionSearch"
+      @clear="clearSearch"
       @refresh="loadSnapshot(true)"
       @toggle-selection="toggleSessionSelectionMode"
       @cleanup-range="openGlobalSessionCleanupModal"
@@ -1566,7 +1607,9 @@ onBeforeUnmount(() => {
     <ProjectManagerSessionGrid
       v-else
       :sessions="visibleSessions"
-      :search-keyword="searchKeyword"
+      :search-keyword="submittedSessionSearchKeyword"
+      :search-matches="projectSessionSearchMatchesByID"
+      :search-navigation-busy="projectSessionSearchLoading || refreshing || sessionOperationBusy"
       :format-updated-at="formatUpdatedAt"
       :resolve-summary="resolveSessionSummary"
       :show-project-name-tag="activeMode === 'session'"

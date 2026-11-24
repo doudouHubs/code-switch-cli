@@ -532,7 +532,8 @@
         "projectMode": "Project Mode",
         "sessionMode": "Session Mode",
         "searchPlaceholder": "Search project names, paths, session titles, or summaries",
-        "conversationSearchPlaceholder": "Search session titles, summaries, or conversations",
+        "sessionSearchPlaceholder": "Press Enter to search session titles, summaries, projects, or paths",
+        "conversationSearchPlaceholder": "Press Enter to search session titles, summaries, or conversations",
         "searchingConversations": "Searching project session conversations",
         "refresh": "Refresh",
         "refreshing": "Syncing...",
@@ -591,6 +592,9 @@
         "openFolder": "Open Folder",
         "openSession": "Open Terminal",
         "openingSession": "Opening...",
+        "searchResultStatus": "{current} / {total} matches",
+        "previousSearchResult": "Previous match",
+        "nextSearchResult": "Next match",
         "pathDetail": "Path"
       },
       "codexStatus": {

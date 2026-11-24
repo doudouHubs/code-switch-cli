@@ -83,7 +83,7 @@ export interface SessionConversationBatchPruneResult {
 
 export interface ProjectSessionSearchResult {
   session_id: string;
-  matched_content: string;
+  matched_contents: string[];
 }
 
 export interface ProjectManagerSnapshot {

@@ -20,12 +20,6 @@ type projectManagerAggregate struct {
 	Sessions []SessionSummary `json:"sessions"`
 }
 
-type projectManagerSessionIndexEntry struct {
-	ID         string    `json:"id"`
-	ThreadName string    `json:"thread_name"`
-	UpdatedAt  time.Time `json:"updated_at"`
-}
-
 type projectManagerSessionState struct {
 	SessionID           string
 	SourceName          string
@@ -78,58 +72,6 @@ func (s *ProjectManagerService) scanProjectManagerData() (projectManagerAggregat
 		Projects: cache.Snapshot.Projects,
 		Sessions: cache.Snapshot.Sessions,
 	}, nil
-}
-
-func (s *ProjectManagerService) readProjectManagerSessionIndex() ([]projectManagerSessionIndexEntry, error) {
-	home, err := getUserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-
-	path := filepath.Join(home, ".codex", "session_index.jsonl")
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []projectManagerSessionIndexEntry{}, nil
-		}
-		return nil, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	// session_index 一行很短，但这里留个余量，省得后续炸 Scanner 限制。
-	buf := make([]byte, 0, 1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	entries := make([]projectManagerSessionIndexEntry, 0, 256)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var entry struct {
-			ID         string `json:"id"`
-			ThreadName string `json:"thread_name"`
-			UpdatedAt  string `json:"updated_at"`
-		}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		updatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.UpdatedAt))
-		if err != nil {
-			updatedAt = time.Time{}
-		}
-		entries = append(entries, projectManagerSessionIndexEntry{
-			ID:         strings.TrimSpace(entry.ID),
-			ThreadName: strings.TrimSpace(entry.ThreadName),
-			UpdatedAt:  updatedAt,
-		})
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return entries, nil
 }
 
 func (s *ProjectManagerService) enrichProjectManagerSessionsFromCodexSessions(

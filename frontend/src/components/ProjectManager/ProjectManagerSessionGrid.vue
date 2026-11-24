@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Check } from '@lucide/vue'
+import { ref, watch } from 'vue'
+import { Check, ChevronDown, ChevronUp } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
 import ProjectManagerCardMenu from './ProjectManagerCardMenu.vue'
 import ProjectManagerCodexStatusLight from './ProjectManagerCodexStatusLight.vue'
@@ -21,6 +22,8 @@ type ProjectManagerCardMenuAction = {
 const props = defineProps<{
   sessions: SessionSummary[]
   searchKeyword: string
+  searchMatches: ReadonlyMap<string, readonly string[]>
+  searchNavigationBusy: boolean
   formatUpdatedAt: (timestamp: number) => string
   resolveSummary: (session: SessionSummary) => string
   showProjectNameTag: boolean
@@ -41,6 +44,52 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+const searchMatchIndices = ref(new Map<string, number>())
+
+const resolveSearchMatches = (sessionID: string): readonly string[] =>
+  props.searchMatches.get(sessionID) ?? []
+
+const resolveSearchMatchIndex = (sessionID: string) =>
+  searchMatchIndices.value.get(sessionID) ?? 0
+
+const resolveCardSummary = (session: SessionSummary) =>
+  resolveSearchMatches(session.id)[resolveSearchMatchIndex(session.id)] ?? props.resolveSummary(session)
+
+const canGoToSearchMatch = (sessionID: string, direction: -1 | 1) => {
+  // 切换只消费已完成的结果，搜索、批量选择和删除期间不能改变用户正在处理的预览。
+  if (props.searchNavigationBusy || props.selectionMode || props.isSessionDeleting(sessionID)) {
+    return false
+  }
+  const nextIndex = resolveSearchMatchIndex(sessionID) + direction
+  return nextIndex >= 0 && nextIndex < resolveSearchMatches(sessionID).length
+}
+
+const goToSearchMatch = (sessionID: string, direction: -1 | 1) => {
+  if (!canGoToSearchMatch(sessionID, direction)) {
+    return
+  }
+  searchMatchIndices.value.set(sessionID, resolveSearchMatchIndex(sessionID) + direction)
+}
+
+watch(
+  [() => props.searchKeyword, () => props.searchMatches],
+  () => {
+    // 输入草稿不会传到这里；重新提交成功或清空结果时，所有卡片回到最新一条命中。
+    searchMatchIndices.value = new Map()
+  },
+  { flush: 'sync' },
+)
+
+watch(() => props.sessions, (sessions) => {
+  const visibleIDs = new Set(sessions.map(session => session.id))
+  // 索引跟随会话 ID 而非卡片位置；重排保留当前预览，移除的卡片及时释放状态。
+  for (const sessionID of searchMatchIndices.value.keys()) {
+    if (!visibleIDs.has(sessionID)) {
+      searchMatchIndices.value.delete(sessionID)
+    }
+  }
+})
 
 const resolveSessionActions = (session: SessionSummary): ProjectManagerCardMenuAction[] => [
   {
@@ -162,10 +211,43 @@ const handleSessionCardClick = (session: SessionSummary) => {
         </p>
         <p class="card-summary">
           <ProjectManagerHighlightedText
-            :text="resolveSummary(session)"
+            :text="resolveCardSummary(session)"
             :keyword="searchKeyword"
           />
         </p>
+        <!-- 卡片点击会打开详情，预览切换区域必须阻止冒泡，避免误打开或误选会话。 -->
+        <div
+          v-if="resolveSearchMatches(session.id).length > 0"
+          class="card-search-navigation"
+          @click.stop
+        >
+          <span class="card-search-position" role="status" aria-live="polite" aria-atomic="true">
+            {{ t('components.projectManager.card.searchResultStatus', {
+              current: resolveSearchMatchIndex(session.id) + 1,
+              total: resolveSearchMatches(session.id).length,
+            }) }}
+          </span>
+          <div class="card-search-navigation-actions">
+            <button
+              type="button"
+              :disabled="!canGoToSearchMatch(session.id, -1)"
+              :title="t('components.projectManager.card.previousSearchResult')"
+              :aria-label="t('components.projectManager.card.previousSearchResult')"
+              @click.stop="goToSearchMatch(session.id, -1)"
+            >
+              <ChevronUp :size="16" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              :disabled="!canGoToSearchMatch(session.id, 1)"
+              :title="t('components.projectManager.card.nextSearchResult')"
+              :aria-label="t('components.projectManager.card.nextSearchResult')"
+              @click.stop="goToSearchMatch(session.id, 1)"
+            >
+              <ChevronDown :size="16" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
         <p class="card-path small">
           <ProjectManagerHighlightedText
             :text="showProjectNameTag ? session.project_path : (session.cwd || session.project_path)"

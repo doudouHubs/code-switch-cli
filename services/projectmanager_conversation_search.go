@@ -14,8 +14,8 @@ const (
 )
 
 type ProjectSessionSearchResult struct {
-	SessionID      string `json:"session_id"`
-	MatchedContent string `json:"matched_content"`
+	SessionID       string   `json:"session_id"`
+	MatchedContents []string `json:"matched_contents"`
 }
 
 type projectManagerConversationSearchDocument struct {
@@ -91,7 +91,7 @@ func (s *ProjectManagerService) SearchProjectSessionConversations(
 		return []ProjectSessionSearchResult{}, nil
 	}
 
-	// 冷缓存构建串行化，避免快速连续输入时多次并发扫描同一批历史文件。
+	// 冷缓存构建串行化，避免连续提交搜索时多次并发扫描同一批历史文件。
 	// 首次完成后后续查询只在内存语料上匹配，等待成本会迅速降下来。
 	s.conversationSearchMu.Lock()
 	defer s.conversationSearchMu.Unlock()
@@ -109,17 +109,17 @@ func (s *ProjectManagerService) SearchProjectSessionConversations(
 		}
 
 		metadataMatched := projectManagerSessionMetadataMatches(session, normalizedQuery)
-		matchedContent, err := s.findProjectManagerSessionLatestUserMatch(session, snapshotCache, query, normalizedQuery)
+		matchedContents, err := s.findProjectManagerSessionUserMatches(session, snapshotCache, query, normalizedQuery)
 		if err != nil {
 			return nil, fmt.Errorf("搜索会话 %s 失败: %w", session.ID, err)
 		}
-		if !metadataMatched && matchedContent == "" {
+		if !metadataMatched && len(matchedContents) == 0 {
 			continue
 		}
 
 		results = append(results, ProjectSessionSearchResult{
-			SessionID:      session.ID,
-			MatchedContent: matchedContent,
+			SessionID:       session.ID,
+			MatchedContents: matchedContents,
 		})
 	}
 
@@ -143,32 +143,43 @@ func projectManagerSessionMetadataMatches(session SessionSummary, normalizedQuer
 	return false
 }
 
-func (s *ProjectManagerService) findProjectManagerSessionLatestUserMatch(
+func (s *ProjectManagerService) findProjectManagerSessionUserMatches(
 	session SessionSummary,
 	snapshotCache projectManagerSnapshotCache,
 	query string,
 	normalizedQuery string,
-) (string, error) {
+) ([]string, error) {
 	file, err := s.findProjectManagerSessionFileByIDFast(session.ID, snapshotCache)
 	if err != nil {
 		// capture-only 历史卡片没有可搜索的详情源，但仍然可以靠元数据参与结果集。
 		if errors.Is(err, errProjectManagerSessionFileNotFound) {
-			return "", nil
+			return []string{}, nil
 		}
-		return "", err
+		return nil, err
 	}
 
 	documents, err := s.loadProjectManagerConversationSearchDocuments(file)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	return matchProjectManagerConversationSearchDocuments(documents, query, normalizedQuery), nil
+}
+
+func matchProjectManagerConversationSearchDocuments(
+	documents []projectManagerConversationSearchDocument,
+	query string,
+	normalizedQuery string,
+) []string {
+	matches := make([]string, 0)
+	// 每条用户消息只生成一段摘要；从新到旧收集，首条预览延续原有的最新命中规则。
+	// 不按摘要去重，相同文本的不同消息仍然是独立搜索结果。
 	for index := len(documents) - 1; index >= 0; index-- {
 		content := documents[index].Content
 		if strings.Contains(strings.ToLower(content), normalizedQuery) {
-			return buildProjectManagerConversationSearchExcerpt(content, query), nil
+			matches = append(matches, buildProjectManagerConversationSearchExcerpt(content, query))
 		}
 	}
-	return "", nil
+	return matches
 }
 
 func (s *ProjectManagerService) loadProjectManagerConversationSearchDocuments(

@@ -533,7 +533,8 @@
         "projectMode": "项目模式",
         "sessionMode": "会话模式",
         "searchPlaceholder": "搜索项目名、路径、会话标题或概要",
-        "conversationSearchPlaceholder": "搜索会话标题、摘要或对话内容",
+        "sessionSearchPlaceholder": "按 Enter 搜索会话标题、概要、项目名或路径",
+        "conversationSearchPlaceholder": "按 Enter 搜索会话标题、摘要或对话内容",
         "searchingConversations": "正在搜索项目内会话详情",
         "refresh": "更新",
         "refreshing": "同步中...",
@@ -592,6 +593,9 @@
         "openFolder": "打开目录",
         "openSession": "打开终端",
         "openingSession": "打开中...",
+        "searchResultStatus": "{current} / {total} 条匹配",
+        "previousSearchResult": "上一条匹配",
+        "nextSearchResult": "下一条匹配",
         "pathDetail": "看路径"
       },
       "codexStatus": {

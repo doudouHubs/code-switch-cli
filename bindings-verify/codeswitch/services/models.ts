@@ -4991,15 +4991,15 @@ export class ProjectManagerSnapshot {
 
 export class ProjectSessionSearchResult {
     "session_id": string;
-    "matched_content": string;
+    "matched_contents": string[];
 
     /** Creates a new ProjectSessionSearchResult instance. */
     constructor($$source: Partial<ProjectSessionSearchResult> = {}) {
         if (!("session_id" in $$source)) {
             this["session_id"] = "";
         }
-        if (!("matched_content" in $$source)) {
-            this["matched_content"] = "";
+        if (!("matched_contents" in $$source)) {
+            this["matched_contents"] = [];
         }
 
         Object.assign(this, $$source);
@@ -5009,7 +5009,11 @@ export class ProjectSessionSearchResult {
      * Creates a new ProjectSessionSearchResult instance from a string or object.
      */
     static createFrom($$source: any = {}): ProjectSessionSearchResult {
+        const $$createField1_0 = $$createType16;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("matched_contents" in $$parsedSource) {
+            $$parsedSource["matched_contents"] = $$createField1_0($$parsedSource["matched_contents"]);
+        }
         return new ProjectSessionSearchResult($$parsedSource as Partial<ProjectSessionSearchResult>);
     }
 }

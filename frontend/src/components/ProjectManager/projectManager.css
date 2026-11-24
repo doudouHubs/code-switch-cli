@@ -707,6 +707,57 @@
   -webkit-line-clamp: 3;
 }
 
+.project-manager-page .card-search-navigation {
+  /* 序号和按钮随卡片宽度换行，长计数不能挤压摘要或撑破最小列宽。 */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  color: var(--mac-text-secondary);
+  font-size: 0.82rem;
+}
+
+.project-manager-page .card-search-position {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-manager-page .card-search-navigation-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.project-manager-page .card-search-navigation-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--mac-accent) 18%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mac-accent) 7%, transparent);
+  color: var(--mac-accent);
+  cursor: pointer;
+}
+
+.project-manager-page .card-search-navigation-actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--mac-accent) 14%, transparent);
+}
+
+.project-manager-page .card-search-navigation-actions button:focus-visible {
+  outline: 2px solid var(--mac-accent);
+  outline-offset: 2px;
+}
+
+.project-manager-page .card-search-navigation-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .project-manager-page .card-footer {
   /* 列宽随容器变化，底部按实际可用空间换行，避免时间和多个操作按钮互相挤压。 */
   display: flex;
